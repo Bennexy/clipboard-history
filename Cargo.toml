@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "clipd",
+    "clipui",
+]
+
+resolver = "2"
