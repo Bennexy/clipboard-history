@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.103"
+display-info = "0.5.9"
+dotenvy = "0.15.7"
+eframe = "0.35.0"
+egui = "0.35.0"
+enigo = "0.6.1"
+
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"

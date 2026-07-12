@@ -183,16 +183,35 @@ mod request_recieve {
             DbRequest::GetAllClipboard { limit, response } => {
                 trace!("Recieved a DbRequest::GetAllClipboard request which will be served now.");
                 response.send(get_all_clipboard(conn, limit)).expect("Failed to send the db response to the reciever.");
-                trace!("Served teh DbRequest::GetAllClipboard request and responded.");
+                trace!("Served the DbRequest::GetAllClipboard request and responded.");
             }
             DbRequest::SearchTextClipboard { limit, search_string, response } => {
                 trace!("Recieved a DbRequest::SearchTextClipboard request which will be served now.");
-                response
-                    .send(search_text(conn, search_string, limit))
-                    .expect("Failed to send the db response to the reciever.");
-                trace!("Served teh DbRequest::SearchTextClipboard request and responded.");
+
+                let results;
+                if let Some(query) = build_fts_query(search_string) {
+                    results = search_text(conn, query, limit);
+                } else {
+                    results = get_all_clipboard(conn, limit);
+                }
+                response.send(results).expect("Failed to send the db response to the reciever.");
+                trace!("Served the DbRequest::SearchTextClipboard request and responded.");
             }
         }
+    }
+
+    fn build_fts_query(input: String) -> Option<String> {
+        let query = input
+            .split_whitespace()
+            .filter_map(|word| {
+                let cleaned: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+
+                if cleaned.is_empty() { None } else { Some(format!("{}*", cleaned)) }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if query.is_empty() { None } else { Some(query) }
     }
 
     fn get_all_clipboard(conn: &Connection, limit: usize) -> Vec<ClipboardEntry> {

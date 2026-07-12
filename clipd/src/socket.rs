@@ -24,20 +24,20 @@ use crate::db::DbRequest;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum SocketMessage {
-    GetAllClipboard { request_id: u64, limit: usize },
+    GetAllClipboard { request_id: usize, limit: usize },
 
-    SearchTextClipboard { request_id: u64, limit: usize, query: String },
+    SearchTextClipboard { request_id: usize, limit: usize, query: String },
 }
 
 #[derive(Debug, Serialize)]
 pub struct SocketResponse<T> {
-    pub request_id: u64,
+    pub request_id: usize,
     pub data: T,
 }
 
 // todo: in the future also push new clips directly to the client.
-async fn handle_client(stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
+async fn handle_client(mut stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Result<()> {
+    let (reader, mut writer) = stream.split();
 
     let mut reader = BufReader::new(reader);
     let mut command = Vec::new();
@@ -45,7 +45,10 @@ async fn handle_client(stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Res
     loop {
         command.clear();
 
-        let bytes_read = reader.read_until(b'0', &mut command).await?;
+        let bytes_read = reader.read_until(0, &mut command).await?;
+        let _ = command.pop_if(|x| *x == 0);
+
+        trace!("Recieved a message {}", String::from_utf8_lossy(&command));
 
         // Client disconnected
         if bytes_read == 0 {
@@ -73,8 +76,9 @@ async fn handle_client(stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Res
 
                 let response = SocketResponse { request_id, data: entries };
 
+                // trace!("Writing data: to socket! {:#?}", response);
                 let mut bytes = serde_json::to_vec(&response)?;
-                bytes.push(b'0');
+                bytes.push(0);
 
                 writer.write_all(&bytes).await?;
             }
@@ -91,7 +95,7 @@ async fn handle_client(stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Res
                 let response = SocketResponse { request_id, data: entries };
 
                 let mut bytes = serde_json::to_vec(&response)?;
-                bytes.push(b'0');
+                bytes.push(0);
 
                 writer.write_all(&bytes).await?;
             }
