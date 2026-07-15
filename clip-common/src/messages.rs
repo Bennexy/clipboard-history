@@ -1,9 +1,20 @@
+use serde::{Deserialize, Serialize};
+
+use crate::model::ClipboardEntry;
+
 /**
  * Client -> Server
  */
-pub enum ClientMessage {}
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ClientRequest {
+    GetClipboardHistory { limit: usize },
+    SearchClipboardHistory { limit: usize, query: String },
+}
 
 /**
  * Server -> Client
  */
-pub enum ServerMessage {}
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ServerResponse {
+    ClipboardEntries(Vec<ClipboardEntry>),
+}

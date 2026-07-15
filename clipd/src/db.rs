@@ -28,6 +28,12 @@ fn setup_db() -> Result<Connection, rusqlite::Error> {
     conn.execute_batch(
         "
     PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode=WAL;
+    PRAGMA synchronous=OFF;
+    PRAGMA busy_timeout = 1000;
+    PRAGMA cache_size = -65536;
+    PRAGMA temp_store = MEMORY;
+
     CREATE TABLE IF NOT EXISTS clipboard_entries (
         id INTEGER PRIMARY KEY,
         mime_type TEXT NOT NULL,
@@ -55,6 +61,13 @@ fn setup_db() -> Result<Connection, rusqlite::Error> {
         content='clipboard_text',
         content_rowid='entry_id'
     );
+
+    CREATE TRIGGER IF NOT EXISTS clipboard_text_insert
+    AFTER INSERT ON clipboard_text
+    BEGIN
+        INSERT INTO clipboard_fts(rowid, text)
+        VALUES (new.entry_id, new.text);
+    END;
 
 
     CREATE TABLE IF NOT EXISTS clipboard_images (
@@ -150,18 +163,6 @@ mod event_recieve {
             params![entry_id, &text],
         )?;
 
-        // Insert into FTS index
-        tx.execute(
-            "
-        INSERT INTO clipboard_fts (
-            rowid,
-            text
-        )
-        VALUES (?1, ?2)
-        ",
-            params![entry_id, &text],
-        )?;
-
         tx.commit()?;
 
         Ok(())
@@ -169,9 +170,12 @@ mod event_recieve {
 }
 
 mod request_recieve {
+    use std::time::Instant;
+
     use super::*;
 
     pub fn handle_request_recieve(conn: &Connection, request: DbRequest) {
+        let now = Instant::now();
         match request {
             DbRequest::GetAllClipboard { limit, response } => {
                 trace!("Recieved a DbRequest::GetAllClipboard request which will be served now.");
@@ -191,20 +195,32 @@ mod request_recieve {
                 trace!("Served the DbRequest::SearchTextClipboard request and responded.");
             }
         }
+        tracing::error!(
+            "Db request fully processed after {}ms -> {}ns",
+            now.elapsed().as_millis(),
+            now.elapsed().as_nanos()
+        )
     }
 
     fn build_fts_query(input: String) -> Option<String> {
-        let query = input
-            .split_whitespace()
-            .filter_map(|word| {
-                let cleaned: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+        let mut query = String::new();
 
-                if cleaned.is_empty() { None } else { Some(format!("{}*", cleaned)) }
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        for word in input.split_whitespace() {
+            let cleaned: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
 
-        if query.is_empty() { None } else { Some(query) }
+            if cleaned.is_empty() {
+                continue;
+            }
+
+            if !query.is_empty() {
+                query.push(' ');
+            }
+
+            query.push_str(&cleaned);
+            query.push('*');
+        }
+
+        (!query.is_empty()).then_some(query)
     }
 
     fn get_all_clipboard(conn: &Connection, limit: usize) -> Vec<ClipboardEntry> {
@@ -233,9 +249,11 @@ mod request_recieve {
                     text: row.get(3)?,
                 })
             })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        rows.map(|r| r.unwrap()).collect()
+        return rows;
     }
 
     fn search_text(conn: &Connection, search_string: String, limit: usize) -> Vec<ClipboardEntry> {
@@ -267,8 +285,10 @@ mod request_recieve {
                     text: row.get(3)?,
                 })
             })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        rows.map(|r| r.unwrap()).collect()
+        return rows;
     }
 }

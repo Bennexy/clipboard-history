@@ -1,54 +1,45 @@
-use std::{env, path::PathBuf};
-
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use anyhow::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::trace;
 
+use clip_common::connection::Connection;
 use clip_common::get_socket_path;
-use clip_common::model::ClipboardEntry;
+use clip_common::messages::{ClientRequest, ServerResponse};
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-pub enum ClientCommand {
-    GetAllClipboard { request_id: usize, limit: usize },
-
-    SearchTextClipboard { request_id: usize, limit: usize, query: String },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ClientResponse {
-    pub request_id: usize,
-    pub data: Vec<ClipboardEntry>,
-}
-
-pub async fn run(mut commands: Receiver<ClientCommand>, responses: Sender<ClientResponse>) -> anyhow::Result<()> {
-    let mut stream = tokio::net::UnixStream::connect(get_socket_path()).await?;
-
-    let (reader, mut writer) = stream.split();
-
-    let mut reader = BufReader::new(reader);
+// todo: i need to make this loop more robust. i want to have a loop for handling socket failures and a inner loop for handling message exchanges.
+pub async fn run(mut commands: Receiver<ClientRequest>, responses: Sender<ServerResponse>) -> anyhow::Result<()> {
+    let stream = tokio::net::UnixStream::connect(get_socket_path()).await?;
+    let (reader, writer) = stream.into_split();
+    let mut connection = Connection::new(reader, writer);
 
     loop {
-        if let Some(command) = commands.recv().await {
-            trace!("Recieved a client command! Will process now.");
-            let mut request = serde_json::to_vec(&command)?;
-            request.push(0);
+        let Some(request) = commands.recv().await else {
+            continue;
+        };
 
-            trace!("Writing the request to the socket: {}", String::from_utf8_lossy(&request));
-            writer.write_all(&request).await?;
-            trace!("Wrote request to the socket!");
+        match connection.send(&request).await {
+            Ok(_) => (),
+            Err(err) => {
+                tracing::error!("Couldn't send message to the daemon due to {err}");
+                continue;
+            }
+        };
 
-            let mut response = Vec::new();
-
-            reader.read_until(0, &mut response).await?;
-            let _ = response.pop_if(|x| *x == 0);
-            // trace!("recieved response from server. {}", String::from_utf8_lossy(&response));
-
-            let response: ClientResponse = serde_json::from_slice(&response).expect("Failed to parse the response!");
-
-            responses.send(response).await?;
-            trace!("Successfully process the client command.");
-        }
+        match connection.receive().await {
+            Ok(Some(msg)) => match responses.send(msg).await {
+                Ok(_) => (),
+                Err(err) => {
+                    tracing::error!("Couldn't send server reponse to the UI due to {err}");
+                    continue;
+                }
+            },
+            Ok(None) => {
+                tracing::error!("Daemon disconnected!");
+                return Err(Error::msg("Daemon is disconnected. Is the service down?"));
+            }
+            Err(err) => {
+                tracing::warn!("Invalid server response: {err}");
+                continue;
+            }
+        };
     }
 }

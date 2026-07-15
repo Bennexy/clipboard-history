@@ -1,6 +1,6 @@
-#![allow(dead_code, unused_imports, unused_variables)]
+// #![allow(dead_code, unused_imports, unused_variables)]
 
-use std::{sync::atomic::AtomicU64, time::Duration};
+use std::time::Duration;
 
 use eframe::egui;
 use enigo::{Enigo, Mouse, Settings};
@@ -11,7 +11,10 @@ use tokio::{
 use tracing::info;
 
 pub mod socket;
-use crate::socket::{ClientCommand, ClientResponse, ClipboardEntry};
+use clip_common::{
+    messages::{ClientRequest, ServerResponse},
+    model::ClipboardEntry,
+};
 
 struct SearchInput {
     search_string: String,
@@ -32,8 +35,8 @@ struct ClipstashApp {
     entries: Vec<ClipboardEntry>,
     search: SearchInput, // input: Option<SearchInput>,
 
-    command_tx: Sender<ClientCommand>,
-    response_rx: Receiver<ClientResponse>,
+    command_tx: Sender<ClientRequest>,
+    response_rx: Receiver<ServerResponse>,
 
     initialized: bool,
     search_focused: bool,
@@ -42,7 +45,7 @@ struct ClipstashApp {
 }
 
 impl ClipstashApp {
-    fn new(tx: Sender<ClientCommand>, rx: Receiver<ClientResponse>, startup: Instant) -> Self {
+    fn new(tx: Sender<ClientRequest>, rx: Receiver<ServerResponse>, startup: Instant) -> Self {
         Self {
             entries: Vec::with_capacity(50),
             search: SearchInput::new(),
@@ -57,8 +60,7 @@ impl ClipstashApp {
 
     fn initialize(&mut self) {
         info!("init start after: {}ms", self.startup.elapsed().as_millis());
-        let _ =
-            self.command_tx.try_send(ClientCommand::GetAllClipboard { request_id: self.command_id_counter, limit: 50 });
+        let _ = self.command_tx.try_send(ClientRequest::GetClipboardHistory { limit: 5000 });
         self.command_id_counter += 1;
         self.initialized = true;
         info!("init done after: {}ms", self.startup.elapsed().as_millis());
@@ -75,7 +77,6 @@ fn cursor_position() -> (f32, f32) {
 
 impl eframe::App for ClipstashApp {
     fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let available_width = ctx.available_width();
         let init_done = self.initialized;
         if !self.initialized {
             info!("startup and starting render loop after: {}ms", self.startup.elapsed().as_millis());
@@ -90,7 +91,9 @@ impl eframe::App for ClipstashApp {
         }
 
         while let Ok(response) = self.response_rx.try_recv() {
-            self.entries = response.data;
+            match response {
+                ServerResponse::ClipboardEntries(entries) => self.entries = entries,
+            };
             info!("startup and recieved data after: {}ms", self.startup.elapsed().as_millis())
         }
 
@@ -110,11 +113,7 @@ impl eframe::App for ClipstashApp {
 
             if self.search.debounce_expired() {
                 let query = self.search.search_string.clone();
-                let _ = self.command_tx.try_send(ClientCommand::SearchTextClipboard {
-                    request_id: self.command_id_counter,
-                    limit: 50,
-                    query,
-                });
+                let _ = self.command_tx.try_send(ClientRequest::SearchClipboardHistory { limit: 50, query });
                 self.command_id_counter += 1;
                 self.search.last_input = None;
             }

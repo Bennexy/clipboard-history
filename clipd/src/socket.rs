@@ -3,7 +3,10 @@ use std::fs;
 use std::os::unix::net::SocketAddr;
 use std::path::PathBuf;
 
+use clip_common::connection::Connection;
 use clip_common::get_socket_path;
+use clip_common::messages::{ClientRequest, ServerResponse};
+use clip_common::model::ClipboardEntry;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
@@ -22,83 +25,41 @@ use tracing::trace;
 
 use crate::db::DbRequest;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub enum SocketMessage {
-    GetAllClipboard { request_id: usize, limit: usize },
-
-    SearchTextClipboard { request_id: usize, limit: usize, query: String },
-}
-
-#[derive(Debug, Serialize)]
-pub struct SocketResponse<T> {
-    pub request_id: usize,
-    pub data: T,
-}
-
 // todo: in the future also push new clips directly to the client.
-async fn handle_client(mut stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.split();
-
-    let mut reader = BufReader::new(reader);
-    let mut command = Vec::new();
+async fn handle_client(stream: UnixStream, tx: Sender<DbRequest>) -> anyhow::Result<()> {
+    let (reader, writer) = stream.into_split();
+    let mut connection = Connection::new(reader, writer);
 
     loop {
-        command.clear();
-
-        let bytes_read = reader.read_until(0, &mut command).await?;
-        let _ = command.pop_if(|x| *x == 0);
-
-        trace!("Recieved a message {}", String::from_utf8_lossy(&command));
-
-        // Client disconnected
-        if bytes_read == 0 {
-            tracing::debug!("Client disconnected");
-            break;
-        }
-
-        let message: SocketMessage = match serde_json::from_slice(&command) {
-            Ok(msg) => msg,
+        let request: ClientRequest = match connection.receive().await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => {
+                tracing::info!("Client disconnected");
+                break;
+            }
             Err(err) => {
-                tracing::warn!("Invalid socket message: {err}");
-                continue;
+                tracing::warn!("Invalid client request: {err}");
+                break;
             }
         };
 
-        match message {
-            SocketMessage::GetAllClipboard { request_id, limit } => {
+        trace!("Received a message {:?}", request);
+
+        match request {
+            ClientRequest::GetClipboardHistory { limit } => {
                 tracing::trace!("Handling GetAllClipboard");
-
                 let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
                 tx.send(DbRequest::GetAllClipboard { limit, response: response_tx }).await?;
-
                 let entries = response_rx.await?;
-
-                let response = SocketResponse { request_id, data: entries };
-
-                // trace!("Writing data: to socket! {:#?}", response);
-                let mut bytes = serde_json::to_vec(&response)?;
-                bytes.push(0);
-
-                writer.write_all(&bytes).await?;
+                connection.send(&ServerResponse::ClipboardEntries(entries)).await?
             }
 
-            SocketMessage::SearchTextClipboard { request_id, limit, query } => {
+            ClientRequest::SearchClipboardHistory { limit, query } => {
                 tracing::trace!("Handling SearchTextClipboard");
-
                 let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
                 tx.send(DbRequest::SearchTextClipboard { limit, search_string: query, response: response_tx }).await?;
-
                 let entries = response_rx.await?;
-
-                let response = SocketResponse { request_id, data: entries };
-
-                let mut bytes = serde_json::to_vec(&response)?;
-                bytes.push(0);
-
-                writer.write_all(&bytes).await?;
+                connection.send(&ServerResponse::ClipboardEntries(entries)).await?;
             }
         }
     }
