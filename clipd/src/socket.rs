@@ -3,6 +3,7 @@ use std::fs;
 use std::os::unix::net::SocketAddr;
 use std::path::PathBuf;
 
+use clip_common::get_socket_path;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
@@ -106,7 +107,7 @@ async fn handle_client(mut stream: UnixStream, tx: Sender<DbRequest>) -> anyhow:
 }
 
 pub async fn run(mut shutdown: broadcast::Receiver<()>, tx: Sender<DbRequest>) -> anyhow::Result<()> {
-    let socket = socket_path();
+    let socket = get_socket_path();
 
     // Remove old socket if it exists
     let _ = fs::remove_file(&socket);
@@ -138,13 +139,7 @@ pub async fn run(mut shutdown: broadcast::Receiver<()>, tx: Sender<DbRequest>) -
         }
     }
 
-    let _ = std::fs::remove_file(socket_path());
+    let _ = std::fs::remove_file(get_socket_path());
 
     Ok(())
-}
-
-fn socket_path() -> PathBuf {
-    let runtime_dir = env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR is not set");
-
-    PathBuf::from(runtime_dir).join("clipstash.sock")
 }

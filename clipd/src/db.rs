@@ -5,6 +5,7 @@ use tokio::sync::{broadcast, mpsc::Receiver};
 use tracing::{debug, trace};
 
 use crate::clipboard::ClipboardEvent;
+use clip_common::model::ClipboardEntry;
 
 pub enum DbRequest {
     GetAllClipboard {
@@ -16,14 +17,6 @@ pub enum DbRequest {
         search_string: String,
         response: tokio::sync::oneshot::Sender<Vec<ClipboardEntry>>,
     },
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct ClipboardEntry {
-    pub id: i64,
-    pub mime_type: String,
-    pub created_at: i64,
-    pub text: Option<String>,
 }
 
 // need to think about the thumbnail thingy...

@@ -5,6 +5,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::trace;
 
+use clip_common::get_socket_path;
+use clip_common::model::ClipboardEntry;
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum ClientCommand {
@@ -19,24 +22,8 @@ pub struct ClientResponse {
     pub data: Vec<ClipboardEntry>,
 }
 
-// dublicated from the clipd deamon
-#[derive(Debug, Deserialize)]
-pub struct ClipboardEntry {
-    pub id: i64,
-    pub mime_type: String,
-    pub created_at: i64,
-    pub text: Option<String>,
-}
-
-// dublicated from the clipd deamon
-fn socket_path() -> PathBuf {
-    let runtime_dir = env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR is not set");
-
-    PathBuf::from(runtime_dir).join("clipstash.sock")
-}
-
-pub async fn run(mut commands: Receiver<ClientCommand>, mut responses: Sender<ClientResponse>) -> anyhow::Result<()> {
-    let mut stream = tokio::net::UnixStream::connect(socket_path()).await?;
+pub async fn run(mut commands: Receiver<ClientCommand>, responses: Sender<ClientResponse>) -> anyhow::Result<()> {
+    let mut stream = tokio::net::UnixStream::connect(get_socket_path()).await?;
 
     let (reader, mut writer) = stream.split();
 
@@ -64,6 +51,4 @@ pub async fn run(mut commands: Receiver<ClientCommand>, mut responses: Sender<Cl
             trace!("Successfully process the client command.");
         }
     }
-
-    Ok(())
 }

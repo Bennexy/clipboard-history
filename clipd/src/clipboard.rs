@@ -12,8 +12,6 @@ use tokio::{
 };
 use tracing::{debug, info};
 
-use sha2::{Digest, Sha256};
-
 #[derive(PartialEq)]
 struct ImageFingerprint {
     width: usize,
