@@ -25,8 +25,9 @@ the store location is user configurable.
 displays the historic clipboard text entries in a descending order includes a full text search
 
 ### project Goals
-Mortis Reddit, Highperformance, Minimalistic, Clipboard, History, 
-Manager, which Mimik the Windows Clipboard, 
-History, Manager, Communication via a Unix Socket,
- Fulltextsearch, Automatic Population the Clipboard on select 
+wirte a lightweight Highperformance, Minimalistic, 
+Clipboard History Manager, which mimiks the Windows Clipboard, 
+History, Communication between UI and Daemon 
+via Unix Socket, Fulltextsearch, 
+Automatic Population the Clipboard on select 
 
