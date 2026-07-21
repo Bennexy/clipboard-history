@@ -17,6 +17,10 @@ pub enum DbRequest {
         search_string: String,
         response: tokio::sync::oneshot::Sender<Vec<ClipboardEntry>>,
     },
+    GetById {
+        id: i64,
+        response: tokio::sync::oneshot::Sender<Option<ClipboardEntry>>,
+    },
 }
 
 // need to think about the thumbnail thingy...
@@ -67,6 +71,21 @@ fn setup_db() -> Result<Connection, rusqlite::Error> {
     BEGIN
         INSERT INTO clipboard_fts(rowid, text)
         VALUES (new.entry_id, new.text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS clipboard_text_delete
+    AFTER DELETE ON clipboard_text
+    BEGIN
+        INSERT INTO clipboard_fts(
+            clipboard_fts,
+            rowid,
+            text
+        )
+        VALUES(
+            'delete',
+            old.entry_id,
+            old.text
+        );
     END;
 
 
@@ -172,6 +191,8 @@ mod event_recieve {
 mod request_recieve {
     use std::time::Instant;
 
+    use rusqlite::OptionalExtension;
+
     use super::*;
 
     pub fn handle_request_recieve(conn: &Connection, request: DbRequest) {
@@ -193,6 +214,10 @@ mod request_recieve {
                 }
                 response.send(results).expect("Failed to send the db response to the reciever.");
                 trace!("Served the DbRequest::SearchTextClipboard request and responded.");
+            }
+            DbRequest::GetById { id, response } => {
+                trace!("Recieved a DbRequest::GetById request which will be served now.");
+                response.send(get_by_id(conn, id)).expect("Failed to send the db response to the reciever.");
             }
         }
         tracing::error!(
@@ -240,20 +265,12 @@ mod request_recieve {
             )
             .unwrap();
 
-        let rows = stmt
-            .query_map([limit as i64], |row| {
-                Ok(ClipboardEntry {
-                    id: row.get(0)?,
-                    mime_type: row.get(1)?,
-                    created_at: row.get(2)?,
-                    text: row.get(3)?,
-                })
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        return rows;
+        stmt.query_map([limit as i64], |row| {
+            Ok(ClipboardEntry { id: row.get(0)?, mime_type: row.get(1)?, created_at: row.get(2)?, text: row.get(3)? })
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
     }
 
     fn search_text(conn: &Connection, search_string: String, limit: usize) -> Vec<ClipboardEntry> {
@@ -290,5 +307,31 @@ mod request_recieve {
             .unwrap();
 
         return rows;
+    }
+
+    // todo: maybe use a dedicated only text value for this?
+    fn get_by_id(conn: &Connection, id: i64) -> Option<ClipboardEntry> {
+        conn.query_one(
+            "
+            SELECT
+                e.id,
+                e.mime_type,
+                e.created_at,
+                t.text
+            FROM clipboard_entries e
+            LEFT JOIN clipboard_text t
+                ON e.id = t.entry_id
+            WHERE e.id = ?1",
+            [id],
+            |row| {
+                Ok(Some(ClipboardEntry {
+                    id: row.get(0)?,
+                    mime_type: row.get(1)?,
+                    created_at: row.get(2)?,
+                    text: row.get(3)?,
+                }))
+            },
+        )
+        .unwrap()
     }
 }

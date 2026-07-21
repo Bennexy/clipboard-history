@@ -1,24 +1,36 @@
 // #![allow(dead_code, unused_imports, unused_variables)]
 
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 use eframe::egui;
+use egui::Vec2;
 use enigo::{Enigo, Mouse, Settings};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::Instant,
 };
-use tracing::info;
+use tracing::{event, info};
 
 pub mod socket;
 use clip_common::{
-    messages::{ClientRequest, ServerResponse},
+    messages::{ClientRequest, ServerEvent, ServerMessage, ServerResponse},
     model::ClipboardEntry,
 };
 
 struct SearchInput {
     search_string: String,
     last_input: Option<Instant>,
+}
+
+enum NotificationKind {
+    Success,
+    Error,
+}
+
+struct Notification {
+    kind: NotificationKind,
+    text: String,
+    expires: Option<Instant>,
 }
 
 impl SearchInput {
@@ -32,22 +44,23 @@ impl SearchInput {
 }
 
 struct ClipstashApp {
-    entries: Vec<ClipboardEntry>,
+    entries: VecDeque<ClipboardEntry>,
     search: SearchInput, // input: Option<SearchInput>,
 
     command_tx: Sender<ClientRequest>,
-    response_rx: Receiver<ServerResponse>,
+    response_rx: Receiver<ServerMessage>,
 
     initialized: bool,
     search_focused: bool,
     command_id_counter: usize,
     startup: Instant,
+    notification: Option<Notification>,
 }
 
 impl ClipstashApp {
-    fn new(tx: Sender<ClientRequest>, rx: Receiver<ServerResponse>, startup: Instant) -> Self {
+    fn new(tx: Sender<ClientRequest>, rx: Receiver<ServerMessage>, startup: Instant) -> Self {
         Self {
-            entries: Vec::with_capacity(50),
+            entries: VecDeque::with_capacity(50),
             search: SearchInput::new(),
             command_tx: tx,
             response_rx: rx,
@@ -55,6 +68,7 @@ impl ClipstashApp {
             search_focused: false,
             command_id_counter: 0,
             startup,
+            notification: None,
         }
     }
 
@@ -92,7 +106,26 @@ impl eframe::App for ClipstashApp {
 
         while let Ok(response) = self.response_rx.try_recv() {
             match response {
-                ServerResponse::ClipboardEntries(entries) => self.entries = entries,
+                ServerMessage::Event(event) => match event {
+                    ServerEvent::NewClipboardEntry(entry) => self.entries.push_front(entry),
+                },
+                ServerMessage::Response(server_response) => match server_response {
+                    ServerResponse::ClipboardEntries(entries) => self.entries = entries.into(),
+                    ServerResponse::Success => {
+                        self.notification = Some(Notification {
+                            kind: NotificationKind::Success,
+                            text: "Clipboard updated".into(),
+                            expires: Some(Instant::now() + Duration::from_secs(1)),
+                        })
+                    }
+                    ServerResponse::Error(error) => {
+                        self.notification = Some(Notification {
+                            kind: NotificationKind::Error,
+                            text: error,
+                            expires: None, // stays until next message
+                        })
+                    }
+                },
             };
             info!("startup and recieved data after: {}ms", self.startup.elapsed().as_millis())
         }
@@ -127,14 +160,67 @@ impl eframe::App for ClipstashApp {
                     for i in row_range {
                         let entry = &self.entries[i];
 
-                        ui.add_sized(
+                        let button = ui.add_sized(
                             [ui.available_width(), 30.0],
-                            egui::Button::selectable(false, entry.text.as_deref().unwrap_or("Missing")),
+                            egui::Button::selectable(false, entry.text.clone()),
                         );
+
+                        if button.clicked() {
+                            let _ = self.command_tx.try_send(ClientRequest::SetClipboardEntry { id: entry.id });
+                        }
                     }
                 },
             );
         });
+
+        if let Some(notification) = &self.notification
+            && let Some(expires) = notification.expires
+        {
+            if Instant::now() >= expires {
+                self.notification = None;
+            } else {
+                ctx.request_repaint_after(expires - Instant::now());
+            }
+        }
+
+        let mut close_notification = false;
+
+        if let Some(notification) = &self.notification {
+            let fill = match notification.kind {
+                NotificationKind::Success => egui::Color32::from_rgb(40, 160, 40),
+                NotificationKind::Error => egui::Color32::from_rgb(180, 40, 40),
+            };
+
+            egui::Area::new("notification".into()).anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0]).show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).fill(fill).corner_radius(6.0).inner_margin(egui::Margin::same(8)).show(
+                    ui,
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&notification.text).color(egui::Color32::WHITE));
+
+                            if matches!(notification.kind, NotificationKind::Error) {
+                                ui.add_space(8.0);
+
+                                let button = ui.add_sized(
+                                    Vec2::splat(16.0),
+                                    egui::Button::new(egui::RichText::new("✕").color(egui::Color32::WHITE).strong())
+                                        .frame(false),
+                                );
+
+                                if button.clicked() {
+                                    close_notification = true;
+                                }
+                            }
+                        });
+                    },
+                );
+            });
+        }
+
+        if close_notification {
+            self.notification = None;
+        }
+
         if !init_done {
             info!("startup done after: {}ms", self.startup.elapsed().as_millis());
         }

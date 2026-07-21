@@ -24,12 +24,13 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
-    let (clipboard_tx, clipboard_rx) = tokio::sync::mpsc::channel(100);
-    let (socket_tx, socket_rx) = tokio::sync::mpsc::channel(100);
+    let (clipboard_tx, clipboard_rx) = tokio::sync::mpsc::channel(25);
+    let (clipboard_events_tx, clipboard_events_rx) = tokio::sync::mpsc::channel(25);
+    let (socket_tx, socket_rx) = tokio::sync::mpsc::channel(25);
 
     let db_worker = tokio::spawn(db::run(shutdown_tx.subscribe(), clipboard_rx, socket_rx));
-    let socket_server = tokio::spawn(socket::run(shutdown_tx.subscribe(), socket_tx));
-    let clipboard_worker = tokio::spawn(clipboard::run(shutdown_tx.subscribe(), clipboard_tx));
+    let socket_server = tokio::spawn(socket::run(shutdown_tx.subscribe(), socket_tx, clipboard_events_tx));
+    let clipboard_worker = tokio::spawn(clipboard::run(shutdown_tx.subscribe(), clipboard_tx, clipboard_events_rx));
 
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;

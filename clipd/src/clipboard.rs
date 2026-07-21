@@ -1,12 +1,14 @@
 use std::{borrow::Cow, sync::Arc};
 
 use ahash::AHasher;
+use anyhow::Error;
 use arboard::{Clipboard, ImageData};
+use clip_common::model::ClipboardEntry;
 use std::hash::{Hash, Hasher};
 use tokio::{
     sync::{
-        broadcast::{self, Receiver},
-        mpsc::Sender,
+        broadcast,
+        mpsc::{Receiver, Sender},
     },
     time::{Duration, sleep},
 };
@@ -39,7 +41,11 @@ pub enum ClipboardEvent {
     Image(Arc<[u8]>),
 }
 
-pub async fn run(mut shutdown: broadcast::Receiver<()>, tx: Sender<ClipboardEvent>) -> anyhow::Result<()> {
+pub async fn run(
+    mut shutdown: broadcast::Receiver<()>,
+    tx: Sender<ClipboardEvent>,
+    mut rx: Receiver<(ClipboardEntry, tokio::sync::oneshot::Sender<Result<(), arboard::Error>>)>,
+) -> anyhow::Result<()> {
     let duration = Duration::from_millis(100);
     let mut last_hash: ClipHash = ClipHash::Empty;
     let mut clipboard = Clipboard::new().expect("Failed to initialize clipboard");
@@ -52,6 +58,10 @@ pub async fn run(mut shutdown: broadcast::Receiver<()>, tx: Sender<ClipboardEven
             },
             _ = sleep(duration) => {
                 poll_clipboard(&tx, &mut clipboard, &mut last_hash).await;
+            }
+
+            Some((event, response_tx)) = rx.recv() => {
+                set_clipboard_entry(&mut clipboard, event, response_tx);
             }
         }
     }
@@ -72,7 +82,7 @@ async fn poll_clipboard(tx: &Sender<ClipboardEvent>, clipboard: &mut Clipboard, 
             tx.send(ClipboardEvent::Text(text)).await.expect("Failed to send the ClipboardEvent::Text via the sender!");
         }
     } else if let Ok(image) = clipboard.get_image() {
-        let is_changed = image_changed(&last_hash, &image);
+        let is_changed = image_changed(last_hash, &image);
 
         if let Some(new_hash) = is_changed {
             debug!("Clipboard contents changed - detected a image!");
@@ -82,6 +92,16 @@ async fn poll_clipboard(tx: &Sender<ClipboardEvent>, clipboard: &mut Clipboard, 
                 .expect("Failed to send the ClipboardEvent::Image via the sender!");
         }
     }
+}
+
+fn set_clipboard_entry(
+    clipboard: &mut Clipboard,
+    clipboard_event: ClipboardEntry,
+    response_tx: tokio::sync::oneshot::Sender<Result<(), arboard::Error>>,
+) {
+    let res = clipboard.set_text(&clipboard_event.text);
+    debug!("set the clipboard entry to: {}", clipboard_event.text);
+    response_tx.send(res).unwrap();
 }
 
 // returns None if the image did not change. Returns the new ClipHash in case it changed.

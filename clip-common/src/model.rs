@@ -3,5 +3,5 @@ pub struct ClipboardEntry {
     pub id: i64,
     pub mime_type: String,
     pub created_at: i64,
-    pub text: Option<String>,
+    pub text: String,
 }

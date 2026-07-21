@@ -3,10 +3,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use clip_common::connection::Connection;
 use clip_common::get_socket_path;
-use clip_common::messages::{ClientRequest, ServerResponse};
+use clip_common::messages::{ClientRequest, ServerMessage, ServerResponse};
 
 // todo: i need to make this loop more robust. i want to have a loop for handling socket failures and a inner loop for handling message exchanges.
-pub async fn run(mut commands: Receiver<ClientRequest>, responses: Sender<ServerResponse>) -> anyhow::Result<()> {
+pub async fn run(mut commands: Receiver<ClientRequest>, responses: Sender<ServerMessage>) -> anyhow::Result<()> {
     let stream = tokio::net::UnixStream::connect(get_socket_path()).await?;
     let (reader, writer) = stream.into_split();
     let mut connection = Connection::new(reader, writer);
