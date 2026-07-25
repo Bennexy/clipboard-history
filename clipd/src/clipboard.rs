@@ -1,9 +1,9 @@
 use std::{borrow::Cow, sync::Arc};
 
 use ahash::AHasher;
-use anyhow::Error;
+use anyhow::{Error, Result};
 use arboard::{Clipboard, ImageData};
-use clip_common::model::ClipboardEntry;
+use clip_common::{messages::ServerResponse, model::ClipboardEntry};
 use std::hash::{Hash, Hasher};
 use tokio::{
     sync::{
@@ -12,7 +12,9 @@ use tokio::{
     },
     time::{Duration, sleep},
 };
-use tracing::{debug, info};
+use tracing::{debug, error, info};
+
+use crate::db::DbRequest;
 
 #[derive(PartialEq)]
 struct ImageFingerprint {
@@ -43,10 +45,10 @@ pub enum ClipboardEvent {
 
 pub async fn run(
     mut shutdown: broadcast::Receiver<()>,
-    tx: Sender<ClipboardEvent>,
-    mut rx: Receiver<(ClipboardEntry, tokio::sync::oneshot::Sender<Result<(), arboard::Error>>)>,
+    tx: Sender<DbRequest>,
+    mut rx: Receiver<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
 ) -> anyhow::Result<()> {
-    let duration = Duration::from_millis(100);
+    let duration = Duration::from_millis(500);
     let mut last_hash: ClipHash = ClipHash::Empty;
     let mut clipboard = Clipboard::new().expect("Failed to initialize clipboard");
 
@@ -61,7 +63,7 @@ pub async fn run(
             }
 
             Some((event, response_tx)) = rx.recv() => {
-                set_clipboard_entry(&mut clipboard, event, response_tx);
+                set_clipboard_entry(&mut clipboard, &tx, event, response_tx, &mut last_hash).await?;
             }
         }
     }
@@ -69,7 +71,7 @@ pub async fn run(
     Ok(())
 }
 
-async fn poll_clipboard(tx: &Sender<ClipboardEvent>, clipboard: &mut Clipboard, last_hash: &mut ClipHash) {
+async fn poll_clipboard(tx: &Sender<DbRequest>, clipboard: &mut Clipboard, last_hash: &mut ClipHash) {
     if let Ok(text) = clipboard.get_text() {
         let hash = ClipHash::Text(full_hash(&text));
 
@@ -79,7 +81,9 @@ async fn poll_clipboard(tx: &Sender<ClipboardEvent>, clipboard: &mut Clipboard, 
 
             *last_hash = hash;
 
-            tx.send(ClipboardEvent::Text(text)).await.expect("Failed to send the ClipboardEvent::Text via the sender!");
+            tx.send(DbRequest::CreateClipboardEntry(ClipboardEvent::Text(text)))
+                .await
+                .expect("Failed to send the ClipboardEvent::Text via the sender!");
         }
     } else if let Ok(image) = clipboard.get_image() {
         let is_changed = image_changed(last_hash, &image);
@@ -87,21 +91,40 @@ async fn poll_clipboard(tx: &Sender<ClipboardEvent>, clipboard: &mut Clipboard, 
         if let Some(new_hash) = is_changed {
             debug!("Clipboard contents changed - detected a image!");
             *last_hash = new_hash;
-            tx.send(ClipboardEvent::Image(image.bytes.into()))
+            tx.send(DbRequest::CreateClipboardEntry(ClipboardEvent::Image(image.bytes.into())))
                 .await
                 .expect("Failed to send the ClipboardEvent::Image via the sender!");
         }
     }
 }
 
-fn set_clipboard_entry(
+async fn set_clipboard_entry(
     clipboard: &mut Clipboard,
-    clipboard_event: ClipboardEntry,
-    response_tx: tokio::sync::oneshot::Sender<Result<(), arboard::Error>>,
-) {
-    let res = clipboard.set_text(&clipboard_event.text);
-    debug!("set the clipboard entry to: {}", clipboard_event.text);
-    response_tx.send(res).unwrap();
+    tx: &Sender<DbRequest>,
+    entry_id: i64,
+    response_tx: tokio::sync::oneshot::Sender<anyhow::Result<ServerResponse>>,
+    last_hash: &mut ClipHash,
+) -> Result<()> {
+    let (db_response_tx, db_response_rx) = tokio::sync::oneshot::channel();
+    tx.send(DbRequest::GetById { id: entry_id, response: db_response_tx }).await?;
+
+    let entry: ClipboardEntry = match db_response_rx.await.unwrap() {
+        Some(entry) => entry,
+        None => {
+            error!(
+                "Failed to set the clipboard to the requested entry due since the entry no longer exsists in the db."
+            );
+            response_tx.send(Ok(ServerResponse::Error("Clipboard entry no longer exsists.".to_string()))).unwrap();
+            return Ok(());
+        }
+    };
+
+    let res = clipboard.set_text(&entry.text).map_err(anyhow::Error::new);
+    *last_hash = ClipHash::Text(full_hash(&entry.text));
+    debug!("set the clipboard entry to: {}", entry.text);
+    response_tx.send(Ok(ServerResponse::Success)).unwrap();
+
+    Ok(())
 }
 
 // returns None if the image did not change. Returns the new ClipHash in case it changed.

@@ -1,45 +1,90 @@
-use anyhow::Error;
+use anyhow::{Error, Result};
+use tokio::net::UnixStream;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use clip_common::connection::Connection;
 use clip_common::get_socket_path;
-use clip_common::messages::{ClientRequest, ServerMessage, ServerResponse};
+use clip_common::messages::{ClientRequest, ServerMessage};
+use tokio::time::{Duration, sleep};
+use tracing::{error, info, trace, warn};
 
 // todo: i need to make this loop more robust. i want to have a loop for handling socket failures and a inner loop for handling message exchanges.
-pub async fn run(mut commands: Receiver<ClientRequest>, responses: Sender<ServerMessage>) -> anyhow::Result<()> {
-    let stream = tokio::net::UnixStream::connect(get_socket_path()).await?;
+pub async fn run(
+    mut shutdown_rx: broadcast::Receiver<()>,
+    mut commands: Receiver<ClientRequest>,
+    responses: Sender<ServerMessage>,
+) -> Result<()> {
+    let duration = Duration::from_millis(1500);
+    loop {
+        let stream = match tokio::net::UnixStream::connect(get_socket_path()).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to connect to the unix socket due to: {}. Is the Daemon running? Will retry in {:.2} seconds",
+                    err,
+                    duration.as_secs_f64()
+                );
+                sleep(duration).await;
+                continue;
+            }
+        };
+
+        trace!("Successfully initialized the socket connection!");
+        match handle_messages(stream, &mut shutdown_rx, &mut commands, &responses).await {
+            Ok(()) => {
+                info!("Socket worker is sutting down gracefully");
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Socket worker ran into an recoverable error: {}. Reconnecting to the socket.",
+                    err.to_string()
+                );
+            }
+        }
+    }
+}
+
+async fn handle_messages(
+    stream: UnixStream,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+    commands: &mut Receiver<ClientRequest>,
+    responses: &Sender<ServerMessage>,
+) -> Result<()> {
     let (reader, writer) = stream.into_split();
-    let mut connection = Connection::new(reader, writer);
+    let mut connection: Connection<tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf> =
+        Connection::new(reader, writer);
 
     loop {
-        let Some(request) = commands.recv().await else {
-            continue;
-        };
-
-        match connection.send(&request).await {
-            Ok(_) => (),
-            Err(err) => {
-                tracing::error!("Couldn't send message to the daemon due to {err}");
-                continue;
-            }
-        };
-
-        match connection.receive().await {
-            Ok(Some(msg)) => match responses.send(msg).await {
-                Ok(_) => (),
-                Err(err) => {
-                    tracing::error!("Couldn't send server reponse to the UI due to {err}");
-                    continue;
-                }
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                return Ok(());
             },
-            Ok(None) => {
-                tracing::error!("Daemon disconnected!");
-                return Err(Error::msg("Daemon is disconnected. Is the service down?"));
+
+            recieved_msg = connection.receive() => {
+                match recieved_msg {
+                    Ok(Some(msg)) => match responses.send(msg).await {
+                        Ok(_) => (),
+                        Err(err) => {
+                            error!("Couldn't send server reponse to the UI due to {err}");
+                            continue;
+                        }
+                    },
+                    Ok(None) => {
+                        error!("Daemon disconnected!");
+                        return Err(Error::msg("Daemon is disconnected. Is the service down?"));
+                    }
+                    Err(err) => {
+                        warn!("Invalid server response: {err}");
+                        continue;
+                    }
+                };
+            },
+
+            Some(request) = commands.recv() => {
+                connection.send(&request).await?;
             }
-            Err(err) => {
-                tracing::warn!("Invalid server response: {err}");
-                continue;
-            }
-        };
+        }
     }
 }

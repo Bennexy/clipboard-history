@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use bytes::BytesMut;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tracing::error;
 
 const HEADER_SIZE: usize = 4;
 const MAX_FRAME_SIZE: usize = u32::MAX as usize; // 4Gib Max for now.
@@ -62,6 +63,7 @@ where
         }
 
         let length = u32::from_be_bytes(header) as usize;
+        error!("Reading {} bytes from the socket stream", length);
 
         if length > MAX_FRAME_SIZE {
             bail!("incoming message too large: {} bytes", length);
@@ -70,6 +72,7 @@ where
         self.read_buffer.resize(length, 0);
 
         self.reader.read_exact(&mut self.read_buffer).await?;
+        error!("Read {} bytes from socket to the buffer", self.read_buffer.len());
 
         let message = postcard::from_bytes(&self.read_buffer)?;
 

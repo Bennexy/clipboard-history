@@ -1,15 +1,26 @@
 // #![allow(dead_code, unused_imports, unused_variables)]
 
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use eframe::egui;
 use egui::Vec2;
 use enigo::{Enigo, Mouse, Settings};
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
+    signal::unix::SignalKind,
+    sync::{
+        broadcast,
+        mpsc::{self, Receiver, Sender},
+    },
     time::Instant,
 };
-use tracing::{event, info};
+use tracing::{debug, error, info, trace};
 
 pub mod socket;
 use clip_common::{
@@ -39,7 +50,31 @@ impl SearchInput {
     }
 
     fn debounce_expired(&self) -> bool {
-        self.last_input.is_some_and(|v| v.elapsed() >= Duration::from_millis(1))
+        self.last_input.is_some_and(|v| v.elapsed() >= Duration::from_millis(50))
+    }
+}
+
+#[derive(Clone)]
+struct Shutdown {
+    triggered: Arc<AtomicBool>,
+    tx: broadcast::Sender<()>,
+}
+
+impl Shutdown {
+    fn new() -> Self {
+        let (tx, _) = broadcast::channel(1);
+        Self { triggered: Arc::new(AtomicBool::new(false)), tx }
+    }
+
+    fn trigger(&self) {
+        if self.triggered.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            let _ = self.tx.send(());
+            debug!("Triggered a shutdown!");
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<()> {
+        self.tx.subscribe()
     }
 }
 
@@ -47,6 +82,7 @@ struct ClipstashApp {
     entries: VecDeque<ClipboardEntry>,
     search: SearchInput, // input: Option<SearchInput>,
 
+    shutdown: Shutdown,
     command_tx: Sender<ClientRequest>,
     response_rx: Receiver<ServerMessage>,
 
@@ -58,10 +94,11 @@ struct ClipstashApp {
 }
 
 impl ClipstashApp {
-    fn new(tx: Sender<ClientRequest>, rx: Receiver<ServerMessage>, startup: Instant) -> Self {
+    fn new(shutdown: Shutdown, tx: Sender<ClientRequest>, rx: Receiver<ServerMessage>, startup: Instant) -> Self {
         Self {
             entries: VecDeque::with_capacity(50),
             search: SearchInput::new(),
+            shutdown,
             command_tx: tx,
             response_rx: rx,
             initialized: false,
@@ -90,12 +127,17 @@ fn cursor_position() -> (f32, f32) {
 }
 
 impl eframe::App for ClipstashApp {
+    fn on_exit(&mut self) {
+        self.shutdown.trigger();
+    }
+
     fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let init_done = self.initialized;
         if !self.initialized {
             info!("startup and starting render loop after: {}ms", self.startup.elapsed().as_millis());
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.shutdown.trigger();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
@@ -187,7 +229,7 @@ impl eframe::App for ClipstashApp {
 
         if let Some(notification) = &self.notification {
             let fill = match notification.kind {
-                NotificationKind::Success => egui::Color32::from_rgb(40, 160, 40),
+                NotificationKind::Success => egui::Color32::from_rgb(40, 160, 40), // todo: in the future i will just hide this box on success
                 NotificationKind::Error => egui::Color32::from_rgb(180, 40, 40),
             };
 
@@ -228,45 +270,124 @@ impl eframe::App for ClipstashApp {
     }
 }
 
-fn main() -> eframe::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let startup = Instant::now();
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    let (app_tx, app_rx) = mpsc::channel(100);
-    let (socket_tx, socket_rx) = mpsc::channel(100);
+    let (app_tx, app_rx) = mpsc::channel(1);
+    let (socket_tx, socket_rx) = mpsc::channel(1);
+    let shutdown = Shutdown::new();
 
-    info!("setup channels after: {}ms", startup.elapsed().as_millis());
+    trace!("setup channels after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
-    let state = ClipstashApp::new(app_tx, socket_rx, startup);
+    let mut socket_worker = tokio::spawn(socket::run(shutdown.subscribe(), app_rx, socket_tx));
 
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.spawn(socket::run(app_rx, socket_tx));
-
-    info!("started socket process: {}ms", startup.elapsed().as_millis());
+    trace!("started socket process: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
     let (x, y) = cursor_position();
 
-    info!("got cursor position after: {}ms", startup.elapsed().as_millis());
+    trace!("got cursor position after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([300.0, 400.0])
-            .with_position([x, y])
-            .with_resizable(true)
-            .with_active(true)
-            .with_minimize_button(false)
-            .with_taskbar(false)
-            .with_always_on_top(),
-        ..Default::default()
-    };
+    let state = ClipstashApp::new(shutdown.clone(), app_tx, socket_rx, startup);
 
-    eframe::run_native(
-        "Clipstash",
-        options,
-        Box::new(|_cc| {
-            info!("starting the ui after: {}ms", startup.elapsed().as_millis());
-            Ok(Box::new(state))
-        }),
-    )
+    let mut ui_worker = tokio::task::spawn_blocking(move || {
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([300.0, 400.0])
+                .with_position([x, y])
+                .with_resizable(true)
+                .with_active(true)
+                .with_minimize_button(false)
+                .with_taskbar(false)
+                .with_always_on_top(),
+            ..Default::default()
+        };
+
+        eframe::run_native(
+            "Clipstash",
+            options,
+            Box::new(|_cc| {
+                info!("starting the ui after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
+                Ok(Box::new(state))
+            }),
+        )
+        .map_err(anyhow::Error::new)
+    });
+
+    let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let mut shutdown_signal = shutdown.subscribe();
+    tokio::select! {
+        _ = shutdown_signal.recv() => {
+            tracing::info!("Shutdown signal via In App broadcast");
+        }
+
+        _ = sigint.recv() => {
+            tracing::info!("Received SIGINT");
+        }
+
+        _ = sigterm.recv() => {
+            tracing::info!("Received SIGTERM");
+        }
+    }
+
+    let shutdown_timeout = Duration::from_secs(1);
+    info!("Recieved shutdown, stopping workers with a timeout of {} secs.", shutdown_timeout.as_secs());
+
+    shutdown.trigger();
+
+    let (ui, socket) = tokio::join!(
+        tokio::time::timeout(shutdown_timeout, &mut ui_worker),
+        tokio::time::timeout(shutdown_timeout, &mut socket_worker),
+    );
+
+    let mut timed_out = false;
+
+    if ui.is_err() {
+        error!("UI shutdown timed out.");
+        timed_out = true;
+    }
+
+    if socket.is_err() {
+        error!("Socket shutdown timed out.");
+        socket_worker.abort();
+        let _ = socket_worker.await;
+        timed_out = true;
+    }
+
+    if timed_out {
+        error!("Forcing process termination.");
+        std::process::exit(1);
+    }
+
+    let gracefull_shutdown = report_worker_result("ui", ui.unwrap()) && report_worker_result("socket", socket.unwrap());
+
+    if !gracefull_shutdown {
+        error!("Shutdown processed with one or more errors.");
+        std::process::exit(1);
+    }
+
+    info!("Shutdown processed gracefully.");
+    Ok(())
+}
+
+fn report_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> bool {
+    match result {
+        Ok(Ok(())) => {
+            tracing::debug!("{name} shutdown cleanly");
+            true
+        }
+
+        Ok(Err(err)) => {
+            tracing::error!("{name} failed: {err:?}");
+            false
+        }
+
+        Err(join_err) => {
+            tracing::error!("{name} panicked: {join_err}");
+            false
+        }
+    }
 }

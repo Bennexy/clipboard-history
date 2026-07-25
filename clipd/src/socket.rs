@@ -1,7 +1,10 @@
+use anyhow::Result;
 use std::env;
 use std::fs;
 use std::os::unix::net::SocketAddr;
 use std::path::PathBuf;
+use tokio::net::unix::OwnedReadHalf;
+use tokio::net::unix::OwnedWriteHalf;
 
 use clip_common::connection::Connection;
 use clip_common::get_socket_path;
@@ -25,52 +28,37 @@ use tracing::info;
 use tracing::trace;
 
 use crate::db::DbRequest;
+use crate::db::Event;
 
 // todo: in the future also push new clips directly to the client.
 // todo: i need to make this loop more robust. i want to have a loop for handling socket failures and a inner loop for handling message exchanges.
 async fn handle_client(
     stream: UnixStream,
     tx: Sender<DbRequest>,
-    event_tx: Sender<(ClipboardEntry, tokio::sync::oneshot::Sender<Result<(), arboard::Error>>)>,
-) -> anyhow::Result<()> {
+    event_tx: Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
+    mut event_rx: broadcast::Receiver<Event>,
+) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut connection = Connection::new(reader, writer);
 
     loop {
-        let request: ClientRequest = match connection.receive().await {
-            Ok(Some(msg)) => msg,
-            Ok(None) => {
-                tracing::info!("Client disconnected");
-                break;
-            }
-            Err(err) => {
-                tracing::warn!("Invalid client request: {err}");
-                break;
-            }
-        };
-
-        trace!("Received a message {:?}", request);
-
-        match request {
-            ClientRequest::GetClipboardHistory { limit } => {
-                tracing::trace!("Handling GetAllClipboard");
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                tx.send(DbRequest::GetAllClipboard { limit, response: response_tx }).await?;
-                let entries = response_rx.await?;
-                connection.send::<ServerMessage>(&ServerResponse::ClipboardEntries(entries).into()).await?
+        tokio::select! {
+            request = connection.receive() => {
+                match request {
+                    Ok(Some(msg)) => handle_message(msg, &mut connection, &tx, &event_tx).await?,
+                    Ok(None) => {
+                        tracing::info!("Client disconnected");
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!("Invalid client request: {err}");
+                        break;
+                    }
+                };
             }
 
-            ClientRequest::SearchClipboardHistory { limit, query } => {
-                tracing::trace!("Handling SearchTextClipboard");
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                tx.send(DbRequest::SearchTextClipboard { limit, search_string: query, response: response_tx }).await?;
-                let entries = response_rx.await?;
-                connection.send::<ServerMessage>(&ServerResponse::ClipboardEntries(entries).into()).await?;
-            }
-
-            ClientRequest::SetClipboardEntry { id } => {
-                let response = set_clipboard_entry(id, &tx, &event_tx).await?;
-                connection.send::<ServerMessage>(&response.into()).await?;
+            event = event_rx.recv() => {
+                handle_event(event?, &mut connection).await?;
             }
         }
     }
@@ -78,11 +66,61 @@ async fn handle_client(
     Ok(())
 }
 
+async fn handle_event(event: Event, connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>) -> Result<()> {
+    connection.send(&event).await
+}
+
+async fn handle_message(
+    request: ClientRequest,
+    connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>,
+    tx: &Sender<DbRequest>,
+    event_tx: &Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
+) -> Result<()> {
+    trace!("Received a message {:?}", request);
+
+    match request {
+        ClientRequest::GetClipboardHistory { limit } => {
+            tracing::trace!("Handling GetAllClipboard");
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            tx.send(DbRequest::GetAllClipboard { limit, response: response_tx }).await?;
+            let entries = response_rx.await?;
+            connection.send::<ServerMessage>(&ServerResponse::ClipboardEntries(entries).into()).await?;
+        }
+
+        ClientRequest::SearchClipboardHistory { limit, query } => {
+            tracing::trace!("Handling SearchTextClipboard");
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            tx.send(DbRequest::SearchTextClipboard { limit, search_string: query, response: response_tx }).await?;
+            let entries = response_rx.await?;
+            connection.send::<ServerMessage>(&ServerResponse::ClipboardEntries(entries).into()).await?;
+        }
+
+        ClientRequest::SetClipboardEntry { id } => {
+            tracing::trace!("Handling SetClipboardEntry");
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel::<Result<ServerResponse>>();
+
+            event_tx.send((id, response_tx)).await?;
+            let res = match response_rx.await? {
+                Ok(response) => response,
+                Err(error) => {
+                    error!("Failed to set the clipboard to the requested entry due to {:?}", error);
+                    ServerResponse::Error(error.to_string())
+                }
+            };
+            tracing::info!("Sending: {:#?}", res);
+            connection.send(&ServerMessage::Response(res)).await?;
+        }
+    }
+
+    return Ok(());
+}
+
 pub async fn run(
     mut shutdown: broadcast::Receiver<()>,
     tx: Sender<DbRequest>,
-    event_tx: Sender<(ClipboardEntry, tokio::sync::oneshot::Sender<Result<(), arboard::Error>>)>,
-) -> anyhow::Result<()> {
+    event_tx: Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
+    event_rx: broadcast::Receiver<Event>,
+) -> Result<()> {
     let socket = get_socket_path();
 
     // Remove old socket if it exists
@@ -110,7 +148,7 @@ pub async fn run(
                 };
                 debug!("Client connected");
 
-                tokio::spawn(handle_client(stream, tx.clone(), event_tx.clone()));
+                tokio::spawn(handle_client(stream, tx.clone(), event_tx.clone(), event_rx.resubscribe()));
             }
         }
     }
@@ -118,35 +156,4 @@ pub async fn run(
     let _ = std::fs::remove_file(get_socket_path());
 
     Ok(())
-}
-
-async fn set_clipboard_entry(
-    id: i64,
-    tx: &Sender<DbRequest>,
-    event_tx: &Sender<(ClipboardEntry, tokio::sync::oneshot::Sender<Result<(), arboard::Error>>)>,
-) -> anyhow::Result<ServerResponse> {
-    tracing::trace!("Handling SetClipboardEntry");
-
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    tx.send(DbRequest::GetById { id, response: response_tx }).await?;
-
-    let entry = match response_rx.await? {
-        Some(entry) => entry,
-        None => {
-            error!(
-                "Failed to set the clipboard to the requested entry due since the entry no longer exsists in the db."
-            );
-            return Ok(ServerResponse::Error("Clipboard entry no longer exsists.".into()));
-        }
-    };
-
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    event_tx.send((entry, response_tx)).await?;
-    match response_rx.await? {
-        Ok(()) => Ok(ServerResponse::Success),
-        Err(error) => {
-            error!("Failed to set the clipboard to the requested entry due to {:?}", error);
-            Ok(ServerResponse::Error(error.to_string()))
-        }
-    }
 }
