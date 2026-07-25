@@ -1,18 +1,9 @@
-#![allow(dead_code, unused_imports, unused_variables)]
+// #![allow(dead_code, unused_imports, unused_variables)]
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use arboard::Clipboard;
-use rusqlite::{Connection, Result, params};
-use tokio::{
-    signal::unix::SignalKind,
-    sync::{broadcast, mpsc::Receiver},
-    task::JoinHandle,
-    time::{Duration, sleep},
-};
-use tracing::{debug, error, info, trace, warn};
-
-use crate::{clipboard::ClipboardEvent, db::Event};
+use clip_common::messages::ServerEvent;
+use rusqlite::Result;
+use tokio::{signal::unix::SignalKind, sync::broadcast, task::JoinHandle, time::Duration};
+use tracing::{error, info};
 
 pub mod clipboard;
 pub mod db;
@@ -24,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
-    let (server_event_tx, _) = broadcast::channel::<Event>(1);
+    let (server_event_tx, _) = broadcast::channel::<ServerEvent>(1);
 
     let (clipboard_tx, clipboard_rx) = tokio::sync::mpsc::channel(2);
     let (clipboard_events_tx, clipboard_events_rx) = tokio::sync::mpsc::channel(2);

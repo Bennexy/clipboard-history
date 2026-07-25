@@ -7,10 +7,7 @@ use tracing::{debug, trace};
 use crate::clipboard::ClipboardEvent;
 use clip_common::model::ClipboardEntry;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Event {
-    NewClipboardEntry(ClipboardEntry),
-}
+use clip_common::messages::ServerEvent;
 
 pub enum DbRequest {
     GetAllClipboard {
@@ -117,7 +114,7 @@ pub async fn run(
     mut shutdown: broadcast::Receiver<()>,
     mut event_rx: Receiver<DbRequest>,
     mut request_rx: Receiver<DbRequest>,
-    event_tx: broadcast::Sender<Event>,
+    event_tx: broadcast::Sender<ServerEvent>,
 ) -> anyhow::Result<()> {
     let mut conn = setup_db().expect("Failed to setup the sqlite.db!");
     debug!("Successfully initialized the db!");
@@ -129,10 +126,10 @@ pub async fn run(
                 break;
             }
             Some(request) = event_rx.recv() => {
-                request_recieve::handle_request_recieve(&mut conn, request)?;
+                request_recieve::handle_request_recieve(&mut conn, &event_tx, request)?;
             },
             Some(request) = request_rx.recv() => {
-                let _ = request_recieve::handle_request_recieve(&mut conn, request);
+                let _ = request_recieve::handle_request_recieve(&mut conn, &event_tx, request);
             }
         }
     }
@@ -141,16 +138,21 @@ pub async fn run(
 }
 
 mod event_recieve {
+
     use super::*;
-    pub fn handle_event_recieve(conn: &mut Connection, event: ClipboardEvent) -> ClipboardEntry {
+    pub fn handle_event_recieve(
+        conn: &mut Connection,
+        event_tx: &broadcast::Sender<ServerEvent>,
+        event: ClipboardEvent,
+    ) {
         match event {
             ClipboardEvent::Text(text) => {
                 debug!("Handling a text clipboard change in sqlite code");
                 let entry = create_text_entry(conn, text).expect("Failed to store the text data!");
                 debug!("Finished handling the text clipboard change.");
-                entry
+                let _ = event_tx.send(ServerEvent::NewClipboardEntry(entry));
             }
-            ClipboardEvent::Image(image) => {
+            ClipboardEvent::Image(_image) => {
                 unimplemented!("image handling not yet implemented!");
             }
         }
@@ -200,11 +202,13 @@ mod event_recieve {
 mod request_recieve {
     use std::time::Instant;
 
-    use rusqlite::OptionalExtension;
-
     use super::*;
 
-    pub fn handle_request_recieve(conn: &mut Connection, request: DbRequest) -> anyhow::Result<()> {
+    pub fn handle_request_recieve(
+        conn: &mut Connection,
+        event_tx: &broadcast::Sender<ServerEvent>,
+        request: DbRequest,
+    ) -> anyhow::Result<()> {
         let now = Instant::now();
 
         match request {
@@ -230,14 +234,10 @@ mod request_recieve {
                 response.send(get_by_id(conn, id)).expect("Failed to send the db response to the reciever.");
             }
             DbRequest::CreateClipboardEntry(event) => {
-                event_recieve::handle_event_recieve(conn, event);
+                event_recieve::handle_event_recieve(conn, event_tx, event);
             }
         };
-        tracing::error!(
-            "Db request fully processed after {}ms -> {}ns",
-            now.elapsed().as_millis(),
-            now.elapsed().as_nanos()
-        );
+        tracing::error!("Db request fully processed after {:.4}ms ", now.elapsed().as_nanos() as f64 / 1_000_000.0,);
 
         Ok(())
     }

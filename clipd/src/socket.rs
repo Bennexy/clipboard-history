@@ -1,8 +1,6 @@
 use anyhow::Result;
-use std::env;
+use clip_common::messages::ServerEvent;
 use std::fs;
-use std::os::unix::net::SocketAddr;
-use std::path::PathBuf;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::unix::OwnedWriteHalf;
 
@@ -10,14 +8,6 @@ use clip_common::connection::Connection;
 use clip_common::get_socket_path;
 use clip_common::messages::ServerMessage;
 use clip_common::messages::{ClientRequest, ServerResponse};
-use clip_common::model::ClipboardEntry;
-use serde::Deserialize;
-use serde::Serialize;
-use serde_json;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::io::BufReader;
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
@@ -28,7 +18,6 @@ use tracing::info;
 use tracing::trace;
 
 use crate::db::DbRequest;
-use crate::db::Event;
 
 // todo: in the future also push new clips directly to the client.
 // todo: i need to make this loop more robust. i want to have a loop for handling socket failures and a inner loop for handling message exchanges.
@@ -36,7 +25,7 @@ async fn handle_client(
     stream: UnixStream,
     tx: Sender<DbRequest>,
     event_tx: Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
-    mut event_rx: broadcast::Receiver<Event>,
+    mut event_rx: broadcast::Receiver<ServerEvent>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut connection = Connection::new(reader, writer);
@@ -66,8 +55,8 @@ async fn handle_client(
     Ok(())
 }
 
-async fn handle_event(event: Event, connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>) -> Result<()> {
-    connection.send(&event).await
+async fn handle_event(event: ServerEvent, connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>) -> Result<()> {
+    connection.send(&ServerMessage::Event(event)).await
 }
 
 async fn handle_message(
@@ -119,7 +108,7 @@ pub async fn run(
     mut shutdown: broadcast::Receiver<()>,
     tx: Sender<DbRequest>,
     event_tx: Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
-    event_rx: broadcast::Receiver<Event>,
+    event_rx: broadcast::Receiver<ServerEvent>,
 ) -> Result<()> {
     let socket = get_socket_path();
 

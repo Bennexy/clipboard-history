@@ -1,10 +1,10 @@
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use ahash::AHasher;
-use anyhow::{Error, Result};
+use anyhow::Result;
 use arboard::{Clipboard, ImageData};
 use clip_common::{messages::ServerResponse, model::ClipboardEntry};
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use tokio::{
     sync::{
         broadcast,
@@ -119,7 +119,7 @@ async fn set_clipboard_entry(
         }
     };
 
-    let res = clipboard.set_text(&entry.text).map_err(anyhow::Error::new);
+    let _res = clipboard.set_text(&entry.text).map_err(anyhow::Error::new);
     *last_hash = ClipHash::Text(full_hash(&entry.text));
     debug!("set the clipboard entry to: {}", entry.text);
     response_tx.send(Ok(ServerResponse::Success)).unwrap();

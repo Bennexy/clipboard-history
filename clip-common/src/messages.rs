@@ -34,7 +34,7 @@ impl From<ServerResponse> for ServerMessage {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ServerEvent {
     NewClipboardEntry(ClipboardEntry),
 }
