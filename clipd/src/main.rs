@@ -114,17 +114,17 @@ async fn handle_shutdown(
 pub fn report_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> bool {
     match result {
         Ok(Ok(())) => {
-            tracing::error!("{name} shutdown cleanly");
+            tracing::debug!("{name} shutdown cleanly");
             true
         }
 
         Ok(Err(err)) => {
-            tracing::error!("{name} failed: {err:?}");
+            tracing::debug!("{name} failed: {err:?}");
             false
         }
 
         Err(join_err) => {
-            tracing::error!("{name} panicked: {join_err}");
+            tracing::debug!("{name} panicked: {join_err}");
             false
         }
     }

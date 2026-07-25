@@ -285,7 +285,7 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let mut socket_worker: tokio::task::JoinHandle<Result<(), anyhow::Error>> =
+    let socket_worker: tokio::task::JoinHandle<Result<(), anyhow::Error>> =
         runtime.spawn(socket::run(shutdown.subscribe(), app_rx, socket_tx));
 
     trace!("started socket process: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
@@ -370,17 +370,17 @@ async fn shutdown_handle(
 pub fn report_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> bool {
     match result {
         Ok(Ok(())) => {
-            tracing::error!("{name} shutdown cleanly");
+            tracing::debug!("{name} shutdown cleanly");
             true
         }
 
         Ok(Err(err)) => {
-            tracing::error!("{name} failed: {err:?}");
+            tracing::debug!("{name} failed: {err:?}");
             false
         }
 
         Err(join_err) => {
-            tracing::error!("{name} panicked: {join_err}");
+            tracing::debug!("{name} panicked: {join_err}");
             false
         }
     }
