@@ -24,7 +24,7 @@ use tracing::{debug, error, info, trace};
 
 pub mod socket;
 use clip_common::{
-    messages::{ClientRequest, ServerEvent, ServerMessage, ServerResponse},
+    messages::{ClientRequest, ServerEvent, ServerMessage, ServerResponse, SocketMessage},
     model::ClipboardEntry,
 };
 
@@ -84,17 +84,18 @@ struct ClipstashApp {
 
     shutdown: Shutdown,
     command_tx: Sender<ClientRequest>,
-    response_rx: Receiver<ServerMessage>,
+    response_rx: Receiver<SocketMessage>,
 
     initialized: bool,
     search_focused: bool,
+    show_ui: bool,
     command_id_counter: usize,
     startup: Instant,
     notification: Option<Notification>,
 }
 
 impl ClipstashApp {
-    fn new(shutdown: Shutdown, tx: Sender<ClientRequest>, rx: Receiver<ServerMessage>, startup: Instant) -> Self {
+    fn new(shutdown: Shutdown, tx: Sender<ClientRequest>, rx: Receiver<SocketMessage>, startup: Instant) -> Self {
         Self {
             entries: VecDeque::with_capacity(50),
             search: SearchInput::new(),
@@ -103,6 +104,7 @@ impl ClipstashApp {
             response_rx: rx,
             initialized: false,
             search_focused: false,
+            show_ui: true,
             command_id_counter: 0,
             startup,
             notification: None,
@@ -150,25 +152,36 @@ impl eframe::App for ClipstashApp {
 
         while let Ok(response) = self.response_rx.try_recv() {
             match response {
-                ServerMessage::Event(event) => match event {
-                    ServerEvent::NewClipboardEntry(entry) => self.entries.push_front(entry),
+                SocketMessage::ClientMessage(_) => (), // noOp
+                SocketMessage::GlobalEvent(global_event) => match global_event {
+                    clip_common::messages::GlobalEvent::ShowUi => {
+                        self.show_ui = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    }
                 },
-                ServerMessage::Response(server_response) => match server_response {
-                    ServerResponse::ClipboardEntries(entries) => self.entries = entries.into(),
-                    ServerResponse::Success => {
-                        self.notification = Some(Notification {
-                            kind: NotificationKind::Success,
-                            text: "Clipboard updated".into(),
-                            expires: Some(Instant::now() + Duration::from_secs(1)),
-                        })
-                    }
-                    ServerResponse::Error(error) => {
-                        self.notification = Some(Notification {
-                            kind: NotificationKind::Error,
-                            text: error,
-                            expires: None, // stays until next message
-                        })
-                    }
+                SocketMessage::ServerMessage(server_message) => match server_message {
+                    ServerMessage::Event(event) => match event {
+                        ServerEvent::NewClipboardEntry(entry) => self.entries.push_front(entry),
+                    },
+                    ServerMessage::Response(server_response) => match server_response {
+                        ServerResponse::ClipboardEntries(entries) => self.entries = entries.into(),
+                        ServerResponse::Success => {
+                            self.show_ui = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            self.notification = Some(Notification {
+                                kind: NotificationKind::Success,
+                                text: "Clipboard updated".into(),
+                                expires: Some(Instant::now() + Duration::from_secs(1)),
+                            })
+                        }
+                        ServerResponse::Error(error) => {
+                            self.notification = Some(Notification {
+                                kind: NotificationKind::Error,
+                                text: error,
+                                expires: None, // stays until next message
+                            })
+                        }
+                    },
                 },
             };
             info!("startup and recieved data after: {}ms", self.startup.elapsed().as_millis())

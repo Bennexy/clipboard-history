@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clip_common::messages::ServerEvent;
+use clip_common::messages::SocketMessage;
 use std::fs;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::unix::OwnedWriteHalf;
@@ -56,11 +57,11 @@ async fn handle_client(
 }
 
 async fn handle_event(event: ServerEvent, connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>) -> Result<()> {
-    connection.send(&ServerMessage::Event(event)).await
+    connection.send(&SocketMessage::ServerMessage(ServerMessage::Event(event))).await
 }
 
 async fn handle_message(
-    request: ClientRequest,
+    request: SocketMessage,
     connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>,
     tx: &Sender<DbRequest>,
     event_tx: &Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
@@ -68,37 +69,48 @@ async fn handle_message(
     trace!("Received a message {:?}", request);
 
     match request {
-        ClientRequest::GetClipboardHistory { limit } => {
-            tracing::trace!("Handling GetAllClipboard");
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            tx.send(DbRequest::GetAllClipboard { limit, response: response_tx }).await?;
-            let entries = response_rx.await?;
-            connection.send::<ServerMessage>(&ServerResponse::ClipboardEntries(entries).into()).await?;
-        }
+        SocketMessage::GlobalEvent(_) | SocketMessage::ServerMessage(_) => (),
+        SocketMessage::ClientMessage(client_request) => match client_request {
+            ClientRequest::GetClipboardHistory { limit } => {
+                tracing::trace!("Handling GetAllClipboard");
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                tx.send(DbRequest::GetAllClipboard { limit, response: response_tx }).await?;
+                let entries = response_rx.await?;
+                connection
+                    .send(&SocketMessage::ServerMessage(ServerMessage::Response(ServerResponse::ClipboardEntries(
+                        entries,
+                    ))))
+                    .await?;
+            }
 
-        ClientRequest::SearchClipboardHistory { limit, query } => {
-            tracing::trace!("Handling SearchTextClipboard");
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            tx.send(DbRequest::SearchTextClipboard { limit, search_string: query, response: response_tx }).await?;
-            let entries = response_rx.await?;
-            connection.send::<ServerMessage>(&ServerResponse::ClipboardEntries(entries).into()).await?;
-        }
+            ClientRequest::SearchClipboardHistory { limit, query } => {
+                tracing::trace!("Handling SearchTextClipboard");
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                tx.send(DbRequest::SearchTextClipboard { limit, search_string: query, response: response_tx }).await?;
+                let entries = response_rx.await?;
+                connection
+                    .send(&SocketMessage::ServerMessage(ServerMessage::Response(ServerResponse::ClipboardEntries(
+                        entries,
+                    ))))
+                    .await?;
+            }
 
-        ClientRequest::SetClipboardEntry { id } => {
-            tracing::trace!("Handling SetClipboardEntry");
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel::<Result<ServerResponse>>();
+            ClientRequest::SetClipboardEntry { id } => {
+                tracing::trace!("Handling SetClipboardEntry");
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel::<Result<ServerResponse>>();
 
-            event_tx.send((id, response_tx)).await?;
-            let res = match response_rx.await? {
-                Ok(response) => response,
-                Err(error) => {
-                    error!("Failed to set the clipboard to the requested entry due to {:?}", error);
-                    ServerResponse::Error(error.to_string())
-                }
-            };
-            tracing::info!("Sending: {:#?}", res);
-            connection.send(&ServerMessage::Response(res)).await?;
-        }
+                event_tx.send((id, response_tx)).await?;
+                let res = match response_rx.await? {
+                    Ok(response) => response,
+                    Err(error) => {
+                        error!("Failed to set the clipboard to the requested entry due to {:?}", error);
+                        ServerResponse::Error(error.to_string())
+                    }
+                };
+                tracing::info!("Sending: {:#?}", res);
+                connection.send(&SocketMessage::ServerMessage(ServerMessage::Response(res))).await?;
+            }
+        },
     }
 
     Ok(())

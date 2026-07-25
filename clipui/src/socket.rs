@@ -5,7 +5,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use clip_common::connection::Connection;
 use clip_common::get_socket_path;
-use clip_common::messages::{ClientRequest, ServerMessage};
+use clip_common::messages::{ClientRequest, SocketMessage};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, trace, warn};
 
@@ -13,7 +13,7 @@ use tracing::{error, info, trace, warn};
 pub async fn run(
     mut shutdown_rx: broadcast::Receiver<()>,
     mut commands: Receiver<ClientRequest>,
-    responses: Sender<ServerMessage>,
+    responses: Sender<SocketMessage>,
 ) -> Result<()> {
     let duration = Duration::from_millis(1500);
     loop {
@@ -50,7 +50,7 @@ async fn handle_messages(
     stream: UnixStream,
     shutdown_rx: &mut broadcast::Receiver<()>,
     commands: &mut Receiver<ClientRequest>,
-    responses: &Sender<ServerMessage>,
+    responses: &Sender<SocketMessage>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut connection: Connection<tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf> =
@@ -83,8 +83,10 @@ async fn handle_messages(
             },
 
             Some(request) = commands.recv() => {
-                connection.send(&request).await?;
+                connection.send(&SocketMessage::ClientMessage(request)).await?;
             }
         }
     }
+
+    // connection.close();
 }
