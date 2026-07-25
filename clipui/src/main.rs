@@ -129,6 +129,7 @@ fn cursor_position() -> (f32, f32) {
 impl eframe::App for ClipstashApp {
     fn on_exit(&mut self) {
         self.shutdown.trigger();
+        trace!("UI is shutting down gracefully");
     }
 
     fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -139,6 +140,7 @@ impl eframe::App for ClipstashApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.shutdown.trigger();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            trace!("UI is shutting down gracefully");
         }
 
         if !self.initialized {
@@ -270,8 +272,7 @@ impl eframe::App for ClipstashApp {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let startup = Instant::now();
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt::init();
@@ -282,7 +283,10 @@ async fn main() -> anyhow::Result<()> {
 
     trace!("setup channels after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
-    let mut socket_worker = tokio::spawn(socket::run(shutdown.subscribe(), app_rx, socket_tx));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    let mut socket_worker: tokio::task::JoinHandle<Result<(), anyhow::Error>> =
+        runtime.spawn(socket::run(shutdown.subscribe(), app_rx, socket_tx));
 
     trace!("started socket process: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
@@ -290,38 +294,46 @@ async fn main() -> anyhow::Result<()> {
 
     trace!("got cursor position after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
+    runtime.spawn(shutdown_handle(shutdown.clone(), socket_worker));
+
     let state = ClipstashApp::new(shutdown.clone(), app_tx, socket_rx, startup);
 
-    let mut ui_worker = tokio::task::spawn_blocking(move || {
-        let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([300.0, 400.0])
-                .with_position([x, y])
-                .with_resizable(true)
-                .with_active(true)
-                .with_minimize_button(false)
-                .with_taskbar(false)
-                .with_always_on_top(),
-            ..Default::default()
-        };
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([300.0, 400.0])
+            .with_position([x, y])
+            .with_resizable(false)
+            .with_active(true)
+            .with_minimize_button(false)
+            .with_taskbar(false)
+            .with_always_on_top(),
+        ..Default::default()
+    };
 
-        eframe::run_native(
-            "Clipstash",
-            options,
-            Box::new(|_cc| {
-                info!("starting the ui after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
-                Ok(Box::new(state))
-            }),
-        )
-        .map_err(anyhow::Error::new)
-    });
+    eframe::run_native(
+        "Clipstash",
+        options,
+        Box::new(|_cc| {
+            info!("starting the ui after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
+            Ok(Box::new(state))
+        }),
+    )
+    .map_err(anyhow::Error::new)?;
 
-    let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
-    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
+    info!("Shutdown processed gracefully.");
+    Ok(())
+}
+
+async fn shutdown_handle(
+    shutdown: Shutdown,
+    mut socket_worker: tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+) -> anyhow::Result<()> {
+    let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
     let mut shutdown_signal = shutdown.subscribe();
     tokio::select! {
         _ = shutdown_signal.recv() => {
-            tracing::info!("Shutdown signal via In App broadcast");
+            tracing::info!("Recieved shutdown signal via in app broadcast");
         }
 
         _ = sigint.recv() => {
@@ -333,50 +345,32 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let shutdown_timeout = Duration::from_secs(1);
-    info!("Recieved shutdown, stopping workers with a timeout of {} secs.", shutdown_timeout.as_secs());
-
     shutdown.trigger();
+    let shutdown_timeout = Duration::from_secs(1);
+    info!("Recieved shutdown, stopping workers with a timeout of {:.2} seconds.", shutdown_timeout.as_secs_f32());
 
-    let (ui, socket) = tokio::join!(
-        tokio::time::timeout(shutdown_timeout, &mut ui_worker),
-        tokio::time::timeout(shutdown_timeout, &mut socket_worker),
-    );
-
-    let mut timed_out = false;
-
-    if ui.is_err() {
-        error!("UI shutdown timed out.");
-        timed_out = true;
-    }
-
+    let socket = tokio::time::timeout(shutdown_timeout, &mut socket_worker).await;
     if socket.is_err() {
         error!("Socket shutdown timed out.");
         socket_worker.abort();
         let _ = socket_worker.await;
-        timed_out = true;
-    }
-
-    if timed_out {
         error!("Forcing process termination.");
         std::process::exit(1);
     }
 
-    let gracefull_shutdown = report_worker_result("ui", ui.unwrap()) && report_worker_result("socket", socket.unwrap());
-
-    if !gracefull_shutdown {
+    if socket.is_ok_and(|socket| report_worker_result("socket", socket)) {
         error!("Shutdown processed with one or more errors.");
         std::process::exit(1);
     }
 
-    info!("Shutdown processed gracefully.");
-    Ok(())
+    info!("Shutdown processed without errors.");
+    std::process::exit(0);
 }
 
-fn report_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> bool {
+pub fn report_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> bool {
     match result {
         Ok(Ok(())) => {
-            tracing::debug!("{name} shutdown cleanly");
+            tracing::error!("{name} shutdown cleanly");
             true
         }
 

@@ -112,7 +112,7 @@ async fn handle_message(
         }
     }
 
-    return Ok(());
+    Ok(())
 }
 
 pub async fn run(
