@@ -1,11 +1,16 @@
 # Clipstash
 
 A lightweight, high-performance clipboard history manager for Linux, written entirely in Rust.
-It focuses on speed, privacy, and user control by keeping clipboard data local and providing a lightweight daemon-based architecture.
 
-Clipstash is designed around a simple idea: **keep the clipboard daemon running, and make the UI appear instantly whenever it's needed.**
+Clipstash focuses on speed, privacy, and user control by keeping clipboard data local and using a lightweight daemon-based architecture.
 
-Instead of combining clipboard monitoring and the user interface into a single application, Clipstash separates them into independent components that communicate over a Unix domain socket.
+Clipstash is designed around a simple idea:
+
+> Keep the clipboard daemon running, and make the UI appear instantly whenever it is needed.
+
+Instead of combining clipboard monitoring and the user interface into a single application, Clipstash separates them into independent components communicating through a Unix domain socket.
+
+The project consists of:
 
 * **clipd** – a background daemon that continuously monitors the system clipboard, stores clipboard history, and serves connected clients.
 * **clipui** – a lightweight popup interface built with **egui** for searching and selecting clipboard entries.
@@ -13,11 +18,21 @@ Instead of combining clipboard monitoring and the user interface into a single a
 
 This architecture keeps resource usage low while minimizing popup latency.
 
-> !Disclamer!
-> Ai was used in the development of this application. AI usage was limited to information gathering and reviews. The Architecture and Code was designed and written by me. This README is mainly AI generated. I created this project as a recreational-project since i enjoy the process of creating, i do not enjoy "vibe-coding" as it lacks what i love about coding. Creativity. That said, enjoy the app!
+---
+
+> **Disclaimer**
+>
+> AI tools were used during development for information gathering, documentation assistance, and reviews.
+>
+> The architecture and implementation decisions are designed and written by the author. This README was created with AI assistance and manually reviewed.
+>
+> Clipstash is a recreational project created for the enjoyment of designing and building software. The goal is to learn, experiment, and create a useful application.
 
 ---
-Clipstash is free and open-source software licensed under the GNU General Public License v3.0. 
+
+## License
+
+Clipstash is free and open-source software licensed under the GNU General Public License v3.0.
 
 See [LICENSE](LICENSE) for details.
 
@@ -49,7 +64,19 @@ Clipstash is designed with privacy in mind:
 - No external services
 - No tracking
 
-The daemon only communicates with local clients through Unix domain sockets.
+The daemon does not transmit clipboard data outside the local machine.
+
+Debug logging may expose clipboard contents and should only be enabled during development.
+
+---
+
+# Why a daemon?
+
+Clipboard history requires continuous monitoring.
+
+Keeping this functionality inside a background daemon avoids repeatedly initializing clipboard access, loading the database, and starting the UI process.
+
+The UI becomes a temporary client that connects only when needed, allowing fast startup while keeping background resource usage low.
 
 ---
 
@@ -57,9 +84,9 @@ The daemon only communicates with local clients through Unix domain sockets.
 
 > **Early development**
 >
-> Clipstash is already functional but is still under active development. Features, APIs, and storage formats may change without notice.
+> Clipstash is functional but still under active development. Features, APIs, and storage formats may change without notice.
 
-### Currently implemented
+## Currently implemented
 
 * Clipboard monitoring
 * SQLite-backed clipboard history
@@ -67,9 +94,9 @@ The daemon only communicates with local clients through Unix domain sockets.
 * Fast popup UI
 * Live daemon → UI communication
 * Selecting an entry restores it to the system clipboard
-* Automatic reconnection between the UI and daemon
+* Automatic reconnection between UI and daemon
 
-### Currently in progress
+## Currently in progress
 
 * Pasting directly into the previously focused application
 * Improved Wayland integration
@@ -90,7 +117,7 @@ Clone the repository:
 ```bash
 git clone https://github.com/Bennexy/clipboard-history
 cd clipboard-history
-```
+````
 
 Start the daemon:
 
@@ -104,23 +131,23 @@ Launch the UI manually:
 cargo run -p clipui --release
 ```
 
-Or use the launcher, which requests the daemon to display the popup UI:
+Or use the launcher:
 
 ```bash
 cargo run -p clip-launcher --release
 ```
 
+The launcher requests the daemon to display the UI:
+
 ```text
-    launcher
-        │
-        ▼
-     ShowUi
-        │
-        ▼
-      clipd
-        │
-        ▼
-     running clipui
+    clip-launcher
+          |
+          | RequestUi
+          v
+        clipd
+          |
+          v
+       clipui
 ```
 
 The UI can be started before or after the daemon. If the daemon is unavailable, the UI will automatically reconnect once it becomes available.
@@ -130,23 +157,22 @@ The UI can be started before or after the daemon. If the daemon is unavailable, 
 # Architecture
 
 ```text
-
-+-------------------+   ShowUi     +----------------------+
-|     launcher      | -----------> |        clipd         |
-+-------------------+              |----------------------|
-                                   | Clipboard watcher    |
-                                   | SQLite + FTS         |
-                                   | Socket server        |
-                                   | Event broadcaster    |
-                                   +----------+-----------+
-                                              ^
-                                              |
-                                      Unix Domain Socket
-                                              |
-                                   +----------+-----------+
-                                   |       clipui         |
-                                   |   egui popup UI      |
-                                   +----------------------+
++-------------------+      RequestUi      +----------------------+
+|  clip-launcher    | ------------------> |        clipd         |
++-------------------+                     |----------------------|
+                                          | Clipboard watcher    |
+                                          | SQLite + FTS         |
+                                          | Socket server        |
+                                          | Event broadcaster    |
+                                          +----------+-----------+
+                                                     ^
+                                                     |
+                                             Unix Domain Socket
+                                                     |
+                                          +----------+-----------+
+                                          |       clipui         |
+                                          |    egui popup UI     |
+                                          +----------------------+
 ```
 
 ## clipd
@@ -170,9 +196,9 @@ The UI is responsible for:
 * Reacting to daemon events
 * Presenting a lightweight popup interface
 
-## clip-laucher
+## clip-launcher
 
-The Launcher is responsible for:
+The launcher is responsible for:
 
 * Requesting visibility of the UI
 
@@ -184,7 +210,7 @@ Clipboard history is stored in a SQLite database.
 
 Current and planned storage modes include:
 
-* Temporary on-disk database (is planed to be removed, easy dev work)
+* Temporary on-disk database (currently used for development and planned for removal)
 * In-memory database (planned)
 * Persistent database location (planned)
 
@@ -196,7 +222,7 @@ The planned in-memory mode provides an ephemeral clipboard history that disappea
 
 Clipstash aims to be:
 
-* Fast (On average the socket responds in less than 0.5ms. Main time consumption is the UI)
+* Fast
 * Lightweight
 * Responsive
 * Minimalistic
@@ -204,20 +230,26 @@ Clipstash aims to be:
 * Easy to maintain
 * Fully written in Rust
 
-Performance is the primary design goal.
+Performance is a primary design goal.
 
-The daemon remains running while the popup UI only connects when needed. This keeps startup latency extremely low while avoiding unnecessary background resource usage.
+The daemon remains running while the popup UI only connects when needed. This keeps startup latency low while avoiding unnecessary background resource usage.
 
-The daemon uses ~8mb of ram when running and > 0.1 cpu.
-The ui uses ~120mb of ram and > 0.1 cpu.
-The launcher is lightweight as well, i didnt measure it as its negitable at best.
+Approximate idle resource usage:
+
+* **clipd:** ~8 MB RAM, negligible CPU usage
+* **clipui:** ~120 MB RAM, negligible CPU usage (typically below 1% on an AMD Ryzen 5800X)
+* **clip-launcher:** negligible resource usage
+
+Local socket communication is typically sub-millisecond; UI rendering is currently the dominant latency factor.
 
 ---
 
 # Roadmap
 
 ## Privacy
-* [ ] only log messages in trace mode -> add explicit info to the config file that this will log all messages and message content!
+
+* [ ] Restrict clipboard-related logging to trace mode only
+* [ ] Add configuration warnings when enabling verbose logging, as logs may contain clipboard contents
 
 ## User Experience
 
@@ -225,7 +257,7 @@ The launcher is lightweight as well, i didnt measure it as its negitable at best
 * [x] Live daemon → UI updates
 * [x] Clipboard restoration
 * [ ] Paste directly into the previously focused application (only possible on X11)
-* [ ] Better keyboard navigation (arrow keys, enter key for selection, etc.)
+* [ ] Better keyboard navigation (arrow keys, enter key selection, etc.)
 * [ ] Image clipboard support
 * [ ] Thumbnail generation pipeline
 
@@ -239,7 +271,7 @@ The launcher is lightweight as well, i didnt measure it as its negitable at best
 ## Reliability
 
 * [x] Automatic socket reconnection
-* [ ] Automatic UI startup when requested by the launcher
+* [ ] Automatically start UI when requested by the launcher
 * [ ] Improved daemon robustness
 * [ ] Better recovery from unexpected failures
 
@@ -268,5 +300,8 @@ The launcher is lightweight as well, i didnt measure it as its negitable at best
 
 # Contributing
 
-Currently i would like to keep this a small private project as im far from being done and i am enjoying the learning process.
-Bug Reports and ideas are welcome, Second or third party Contributions are currently not planed.
+Clipstash is currently maintained as a personal learning project.
+
+Bug reports, feature suggestions, and discussions are welcome.
+
+At this stage, external code contributions may be limited while the architecture is still evolving.
