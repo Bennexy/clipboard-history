@@ -62,10 +62,11 @@ async fn handle_messages(
                 return Ok(());
             },
 
-            recieved_msg = connection.receive() => {
+            recieved_msg = connection.receive::<SocketMessage>() => {
                 match recieved_msg {
-                    Ok(Some(msg)) => match responses.send(msg).await {
-                        Ok(_) => (),
+                    Ok(Some(msg)) => match responses.send(msg.clone()).await {
+                        Ok(_) => {
+                            info!("socket worker recieved a message of type: {:?}", msg);},
                         Err(err) => {
                             error!("Couldn't send server reponse to the UI due to {err}");
                             continue;

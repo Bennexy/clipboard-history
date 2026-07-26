@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use eframe::egui;
@@ -17,14 +17,16 @@ use tokio::{
     sync::{
         broadcast,
         mpsc::{self, Receiver, Sender},
+        oneshot,
     },
     time::Instant,
 };
 use tracing::{debug, error, info, trace};
 
 pub mod socket;
+pub mod ui_worker;
 use clip_common::{
-    messages::{ClientRequest, ServerEvent, ServerMessage, ServerResponse, SocketMessage},
+    messages::{ClientRequest, ServerEvent, ServerMessage, ServerResponse},
     model::ClipboardEntry,
 };
 
@@ -55,7 +57,7 @@ impl SearchInput {
 }
 
 #[derive(Clone)]
-struct Shutdown {
+pub struct Shutdown {
     triggered: Arc<AtomicBool>,
     tx: broadcast::Sender<()>,
 }
@@ -84,18 +86,18 @@ struct ClipstashApp {
 
     shutdown: Shutdown,
     command_tx: Sender<ClientRequest>,
-    response_rx: Receiver<SocketMessage>,
+    response_rx: Receiver<ServerMessage>,
 
     initialized: bool,
     search_focused: bool,
-    show_ui: bool,
     command_id_counter: usize,
+    has_been_focused: bool,
     startup: Instant,
     notification: Option<Notification>,
 }
 
 impl ClipstashApp {
-    fn new(shutdown: Shutdown, tx: Sender<ClientRequest>, rx: Receiver<SocketMessage>, startup: Instant) -> Self {
+    fn new(shutdown: Shutdown, tx: Sender<ClientRequest>, rx: Receiver<ServerMessage>, startup: Instant) -> Self {
         Self {
             entries: VecDeque::with_capacity(50),
             search: SearchInput::new(),
@@ -104,7 +106,7 @@ impl ClipstashApp {
             response_rx: rx,
             initialized: false,
             search_focused: false,
-            show_ui: true,
+            has_been_focused: false,
             command_id_counter: 0,
             startup,
             notification: None,
@@ -140,9 +142,19 @@ impl eframe::App for ClipstashApp {
             info!("startup and starting render loop after: {}ms", self.startup.elapsed().as_millis());
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.shutdown.trigger();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            trace!("UI is shutting down gracefully");
+            self.has_been_focused = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.initialized = false;
+        }
+
+        if ctx.input(|i| i.viewport().focused == Some(true)) {
+            self.has_been_focused = true;
+        }
+
+        if self.has_been_focused && ctx.input(|i| i.viewport().focused == Some(false)) {
+            self.has_been_focused = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.initialized = false;
         }
 
         if !self.initialized {
@@ -152,36 +164,26 @@ impl eframe::App for ClipstashApp {
 
         while let Ok(response) = self.response_rx.try_recv() {
             match response {
-                SocketMessage::ClientMessage(_) => (), // noOp
-                SocketMessage::GlobalEvent(global_event) => match global_event {
-                    clip_common::messages::GlobalEvent::ShowUi => {
-                        self.show_ui = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    }
+                ServerMessage::Event(event) => match event {
+                    ServerEvent::NewClipboardEntry(entry) => self.entries.push_front(entry),
                 },
-                SocketMessage::ServerMessage(server_message) => match server_message {
-                    ServerMessage::Event(event) => match event {
-                        ServerEvent::NewClipboardEntry(entry) => self.entries.push_front(entry),
-                    },
-                    ServerMessage::Response(server_response) => match server_response {
-                        ServerResponse::ClipboardEntries(entries) => self.entries = entries.into(),
-                        ServerResponse::Success => {
-                            self.show_ui = false;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            self.notification = Some(Notification {
-                                kind: NotificationKind::Success,
-                                text: "Clipboard updated".into(),
-                                expires: Some(Instant::now() + Duration::from_secs(1)),
-                            })
-                        }
-                        ServerResponse::Error(error) => {
-                            self.notification = Some(Notification {
-                                kind: NotificationKind::Error,
-                                text: error,
-                                expires: None, // stays until next message
-                            })
-                        }
-                    },
+                ServerMessage::Response(server_response) => match server_response {
+                    ServerResponse::ClipboardEntries(entries) => self.entries = entries.into(),
+                    ServerResponse::Success => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        self.notification = Some(Notification {
+                            kind: NotificationKind::Success,
+                            text: "Clipboard updated".into(),
+                            expires: Some(Instant::now() + Duration::from_secs(1)),
+                        })
+                    }
+                    ServerResponse::Error(error) => {
+                        self.notification = Some(Notification {
+                            kind: NotificationKind::Error,
+                            text: error,
+                            expires: None, // stays until next message
+                        })
+                    }
                 },
             };
             info!("startup and recieved data after: {}ms", self.startup.elapsed().as_millis())
@@ -281,7 +283,6 @@ impl eframe::App for ClipstashApp {
         if !init_done {
             info!("startup done after: {}ms", self.startup.elapsed().as_millis());
         }
-        //ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
@@ -292,6 +293,7 @@ fn main() -> anyhow::Result<()> {
 
     let (app_tx, app_rx) = mpsc::channel(1);
     let (socket_tx, socket_rx) = mpsc::channel(1);
+    let (ui_message_tx, ui_message_rx) = mpsc::channel(1);
     let shutdown = Shutdown::new();
 
     trace!("setup channels after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
@@ -307,9 +309,10 @@ fn main() -> anyhow::Result<()> {
 
     trace!("got cursor position after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
 
-    runtime.spawn(shutdown_handle(shutdown.clone(), socket_worker));
+    let (ctx_tx, ctx_rx) = oneshot::channel();
+    let ui_worker = runtime.spawn(ui_worker::run(shutdown.clone(), socket_rx, ui_message_tx, ctx_rx));
 
-    let state = ClipstashApp::new(shutdown.clone(), app_tx, socket_rx, startup);
+    runtime.spawn(shutdown_handle(shutdown.clone(), socket_worker, ui_worker));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -317,8 +320,15 @@ fn main() -> anyhow::Result<()> {
             .with_position([x, y])
             .with_resizable(false)
             .with_active(true)
-            .with_minimize_button(false)
             .with_taskbar(false)
+            .with_decorations(false)
+            .with_close_button(false)
+            .with_maximize_button(false)
+            .with_minimize_button(false)
+            .with_movable_by_background(false)
+            .with_title_shown(true)
+            .with_titlebar_shown(true)
+            .with_title("Clipboard histroy")
             .with_always_on_top(),
         ..Default::default()
     };
@@ -326,7 +336,12 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Clipstash",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            let state = ClipstashApp::new(shutdown.clone(), app_tx, ui_message_rx, startup);
+            ctx_tx
+                .send(cc.egui_ctx.clone())
+                .expect("Failed to send the egui context to the ui_worker. This should never happen!");
+
             info!("starting the ui after: {:.2}ms", startup.elapsed().as_nanos() as f64 / 1_000_000.0);
             Ok(Box::new(state))
         }),
@@ -340,6 +355,7 @@ fn main() -> anyhow::Result<()> {
 async fn shutdown_handle(
     shutdown: Shutdown,
     mut socket_worker: tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+    mut ui_worker: tokio::task::JoinHandle<Result<(), anyhow::Error>>,
 ) -> anyhow::Result<()> {
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
@@ -362,22 +378,43 @@ async fn shutdown_handle(
     let shutdown_timeout = Duration::from_secs(1);
     info!("Recieved shutdown, stopping workers with a timeout of {:.2} seconds.", shutdown_timeout.as_secs_f32());
 
-    let socket = tokio::time::timeout(shutdown_timeout, &mut socket_worker).await;
+    let (socket, ui) = tokio::join!(
+        tokio::time::timeout(shutdown_timeout, &mut socket_worker),
+        tokio::time::timeout(shutdown_timeout, &mut ui_worker)
+    );
+
+    let mut timed_out = false;
     if socket.is_err() {
         error!("Socket shutdown timed out.");
         socket_worker.abort();
         let _ = socket_worker.await;
+        timed_out = true;
+    }
+
+    if ui.is_err() {
+        error!("UI shutdown timed out.");
+        ui_worker.abort();
+        let _ = ui_worker.await;
+        timed_out = true;
+    }
+
+    if timed_out {
         error!("Forcing process termination.");
         std::process::exit(1);
     }
 
-    if socket.is_ok_and(|socket| report_worker_result("socket", socket)) {
+    let socket_ok = socket.is_ok_and(|socket| report_worker_result("socket", socket));
+    let ui_ok = ui.is_ok_and(|ui| report_worker_result("ui", ui));
+
+    let is_gracefull_shutdown = socket_ok && ui_ok;
+
+    if !is_gracefull_shutdown {
         error!("Shutdown processed with one or more errors.");
         std::process::exit(1);
     }
 
-    info!("Shutdown processed without errors.");
-    std::process::exit(0);
+    info!("Shutdown completed gracefully");
+    std::process::exit(0); // end main process in case ui hasn't shut down yet.
 }
 
 pub fn report_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> bool {

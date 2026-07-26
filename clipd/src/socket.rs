@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clip_common::messages::GlobalEvent;
 use clip_common::messages::ServerEvent;
 use clip_common::messages::SocketMessage;
 use std::fs;
@@ -27,15 +28,18 @@ async fn handle_client(
     tx: Sender<DbRequest>,
     event_tx: Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
     mut event_rx: broadcast::Receiver<ServerEvent>,
+    global_event_broadcaster: broadcast::Sender<GlobalEvent>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut connection = Connection::new(reader, writer);
+
+    let mut global_event_rx = global_event_broadcaster.subscribe();
 
     loop {
         tokio::select! {
             request = connection.receive() => {
                 match request {
-                    Ok(Some(msg)) => handle_message(msg, &mut connection, &tx, &event_tx).await?,
+                    Ok(Some(msg)) => handle_message(msg, &mut connection, &tx, &event_tx, global_event_broadcaster.clone()).await?,
                     Ok(None) => {
                         tracing::info!("Client disconnected");
                         break;
@@ -46,6 +50,11 @@ async fn handle_client(
                     }
                 };
             }
+
+            Ok(global_event) = global_event_rx.recv() => {
+                connection.send(&SocketMessage::GlobalEvent(global_event)).await?;
+            }
+
 
             event = event_rx.recv() => {
                 handle_event(event?, &mut connection).await?;
@@ -65,11 +74,13 @@ async fn handle_message(
     connection: &mut Connection<OwnedReadHalf, OwnedWriteHalf>,
     tx: &Sender<DbRequest>,
     event_tx: &Sender<(i64, tokio::sync::oneshot::Sender<Result<ServerResponse>>)>,
+    global_event_broadcaster: broadcast::Sender<GlobalEvent>,
 ) -> Result<()> {
     trace!("Received a message {:?}", request);
 
     match request {
-        SocketMessage::GlobalEvent(_) | SocketMessage::ServerMessage(_) => (),
+        SocketMessage::ServerMessage(_) => (),
+        SocketMessage::GlobalEvent(event) => global_event_broadcaster.send(event).map(|_| ())?,
         SocketMessage::ClientMessage(client_request) => match client_request {
             ClientRequest::GetClipboardHistory { limit } => {
                 tracing::trace!("Handling GetAllClipboard");
@@ -127,6 +138,8 @@ pub async fn run(
     // Remove old socket if it exists
     let _ = fs::remove_file(&socket);
 
+    let (broadcast_tx, _) = broadcast::channel(2);
+
     let listener = UnixListener::bind(&socket)
         .unwrap_or_else(|_| panic!("Failed to bind to the socket: {}", socket.to_string_lossy()));
 
@@ -149,7 +162,7 @@ pub async fn run(
                 };
                 debug!("Client connected");
 
-                tokio::spawn(handle_client(stream, tx.clone(), event_tx.clone(), event_rx.resubscribe()));
+                tokio::spawn(handle_client(stream, tx.clone(), event_tx.clone(), event_rx.resubscribe(), broadcast_tx.clone()));
             }
         }
     }
