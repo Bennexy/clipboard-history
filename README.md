@@ -20,16 +20,6 @@ This architecture keeps resource usage low while minimizing popup latency.
 
 ---
 
-> **Disclaimer**
->
-> AI tools were used during development for information gathering, documentation assistance, and reviews.
->
-> The architecture and implementation decisions are designed and written by the author. This README was created with AI assistance and manually reviewed.
->
-> Clipstash is a recreational project created for the enjoyment of designing and building software. The goal is to learn, experiment, and create a useful application.
-
----
-
 ## License
 
 Clipstash is free and open-source software licensed under the GNU General Public License v3.0.
@@ -240,10 +230,10 @@ Performance is a primary design goal.
 
 The daemon remains running while the popup UI only connects when needed. This keeps startup latency low while avoiding unnecessary background resource usage.
 
-Approximate idle resource usage:
+Approximate idle resource usage, measured on Linux x86_64 development build, active state:
 
 * **clipd:** ~8 MB RAM, negligible CPU usage
-* **clipui:** ~120 MB RAM, negligible CPU usage (typically below 1% on an AMD Ryzen 5800X)
+* **clipui:** ~120 MB RAM, negligible CPU usage
 * **clip-launcher:** negligible resource usage
 
 Local socket communication is typically sub-millisecond; UI rendering is currently the dominant latency factor.
@@ -320,3 +310,12 @@ Because the application is relatively small and the architecture is still evolvi
 Bug reports, feature suggestions, and discussions are welcome.
 
 As the project matures, automated tests and contribution guidelines will be added.
+---
+# Development Notes
+> **Disclaimer**
+>
+> AI tools were used during development for information gathering, documentation assistance, and reviews.
+>
+> The architecture and implementation decisions are designed and written by the author. This README was created with AI assistance and manually reviewed.
+>
+> Clipstash is a recreational project created for the enjoyment of designing and building software. The goal is to learn, experiment, and create a useful application.
