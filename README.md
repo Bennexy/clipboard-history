@@ -104,6 +104,12 @@ The UI becomes a temporary client that connects only when needed, allowing fast 
 * Additional performance optimizations
 * Packaging and binary releases
 
+### Testing
+
+Currently, Clipstash does not include an automated test suite.
+
+Testing is performed manually by running the daemon, UI, and launcher together and validating real clipboard workflows. Automated tests are planned once the architecture stabilizes.
+
 ---
 
 # Installation
@@ -289,6 +295,11 @@ Local socket communication is typically sub-millisecond; UI rendering is current
 * [ ] Wayland polish
 * [ ] Automatic startup (systemd user service)
 
+## Development
+
+* [ ] Automated test suite
+* [ ] Integration tests for daemon/client communication
+
 ## Releases
 
 * [ ] Prebuilt binaries
@@ -302,6 +313,10 @@ Local socket communication is typically sub-millisecond; UI rendering is current
 
 Clipstash is currently maintained as a personal learning project.
 
+The project is still in an early architectural phase. Development and validation are currently done through manual testing and real-world usage.
+
+Because the application is relatively small and the architecture is still evolving, a formal automated test suite has not been introduced yet.
+
 Bug reports, feature suggestions, and discussions are welcome.
 
-At this stage, external code contributions may be limited while the architecture is still evolving.
+As the project matures, automated tests and contribution guidelines will be added.
